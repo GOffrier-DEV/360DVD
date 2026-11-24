@@ -729,19 +729,12 @@ static int32_t eval_command(const uint8_t *bytes, registers_t* registers, link_t
   return res;
 }
 
-#ifdef DVD360_XBOX
-extern int dvd360_vm_trace_enabled(void);
-extern void dvd360_vm_trace_line(const char *message);
-#endif
 
 /* Evaluate a set of commands in the given register set (which is modified) */
 int32_t vmEval_CMD(const vm_cmd_t commands[], int32_t num_commands,
                registers_t *registers, link_t *return_values) {
   int32_t i = 0;
   int32_t total = 0;
-#ifdef DVD360_XBOX
-  const int trace = dvd360_vm_trace_enabled();
-#endif
 
 #ifdef TRACE
   /*  DEBUG */
@@ -757,44 +750,12 @@ int32_t vmEval_CMD(const vm_cmd_t commands[], int32_t num_commands,
   i = 0;
   while(i < num_commands && total < 100000) {
     int32_t line;
-#ifdef DVD360_XBOX
-    uint16_t before_g[16], before_s[24];
-    if (trace) {
-      memcpy(before_g, registers->GPRM, sizeof(before_g));
-      memcpy(before_s, registers->SPRM, sizeof(before_s));
-    }
-#endif
 
 #ifdef TRACE
     vm_print_cmd(i, &commands[i]);
 #endif
 
     line = eval_command(&commands[i].bytes[0], registers, return_values);
-#ifdef DVD360_XBOX
-    if (trace) {
-      const unsigned char *b = commands[i].bytes;
-      char message[128];
-      unsigned j;
-      snprintf(message, sizeof(message), "VM cmd %d: %02x%02x%02x%02x%02x%02x%02x%02x result=%d",
-               (int)i + 1, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], (int)line);
-      dvd360_vm_trace_line(message);
-      for (j = 0; j < 16; ++j)
-        if (before_g[j] != registers->GPRM[j]) {
-          snprintf(message, sizeof(message), "VM GPRM[%u]: %u -> %u", j, before_g[j], registers->GPRM[j]);
-          dvd360_vm_trace_line(message);
-        }
-      for (j = 0; j < 24; ++j)
-        if (before_s[j] != registers->SPRM[j]) {
-          snprintf(message, sizeof(message), "VM SPRM[%u]: %u -> %u", j, before_s[j], registers->SPRM[j]);
-          dvd360_vm_trace_line(message);
-        }
-      if (line < 0) {
-        snprintf(message, sizeof(message), "VM link=%u args=%u,%u,%u", (unsigned)return_values->command,
-                 return_values->data1, return_values->data2, return_values->data3);
-        dvd360_vm_trace_line(message);
-      }
-    }
-#endif
 
     if (line < 0) { /*  Link command */
 #ifdef TRACE

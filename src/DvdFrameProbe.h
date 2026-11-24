@@ -9,8 +9,8 @@ class DvdFrameProbe
 public:
     DvdFrameProbe();
     ~DvdFrameProbe();
-    HRESULT Load(IDirect3DDevice9* device, FILE* file);
-    HRESULT DecodeMpeg2(IDirect3DDevice9* device, FILE* file);
+    HRESULT Load(IDirect3DDevice9* device, HANDLE file);
+    HRESULT DecodeMpeg2(IDirect3DDevice9* device, HANDLE file);
     HRESULT Advance(IDirect3DDevice9* device, double elapsed);
     unsigned FramesReady() const { return m_framesReady; }
     unsigned LateByFrame() const { return m_lateByFrame; }
@@ -18,10 +18,18 @@ public:
     unsigned ParseCalls() const { return m_parseCalls; }
     double ParseMilliseconds() const;
     unsigned Underruns() const { return m_underruns; }
+    const char* DecodeMode() const { return m_decodeMode; }
     unsigned MotionBlocks() const { return m_motionBlocks; }
     unsigned DcBlocks() const { return m_dcBlocks; }
     unsigned IdctBlocks() const { return m_idctBlocks; }
     double ReadMilliseconds() const;
+    double InputWaitMilliseconds() const;
+    unsigned QueueDepth() const;
+    double LastDecodeMilliseconds() const;
+    double LastCopyMilliseconds() const;
+    double WorstReadMilliseconds() const;
+    unsigned ReadCalls() const { return m_readCalls; }
+    unsigned ReadBytes() const { return m_readBytes; }
     double UploadMilliseconds() const;
     double GpuWaitMilliseconds() const;
     HRESULT Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const;
@@ -32,6 +40,7 @@ private:
     HRESULT Consume(IDirect3DDevice9* device, DWORD timeout);
     void CloseDecoder();
     static DWORD WINAPI DecodeWorker(void* context);
+    static DWORD WINAPI ReadWorker(void* context);
     struct Decoder;
     Decoder* m_decoder;
     unsigned m_width, m_height;
@@ -41,7 +50,12 @@ private:
     unsigned m_parseCalls;
     LONGLONG m_parseTicks, m_parseFrequency;
     LONGLONG m_readTicks, m_uploadTicks, m_gpuWaitTicks;
+    LONGLONG m_inputWaitTicks;
+    LONGLONG m_lastDecodeTicks, m_lastCopyTicks;
+    LONGLONG m_worstReadTicks;
+    unsigned m_readCalls, m_readBytes;
     unsigned m_underruns, m_textureSet;
+    const char* m_decodeMode;
     unsigned m_motionBlocks, m_dcBlocks, m_idctBlocks;
     HRESULT LoadPlanes(IDirect3DDevice9* device, unsigned width, unsigned height,
                        const unsigned char* const planes[3], unsigned stride);

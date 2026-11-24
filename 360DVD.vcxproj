@@ -81,7 +81,7 @@
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xapilibd.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xapilibd.lib;xaudio2.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">
@@ -95,7 +95,7 @@
     </ClCompile>
     <Link>
       <AdditionalOptions>/ignore:4089 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9.lib;d3dx9.lib;xgraphics.lib;xapilib.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9.lib;d3dx9.lib;xgraphics.lib;xapilib.lib;xaudio2.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <SetChecksum>true</SetChecksum>

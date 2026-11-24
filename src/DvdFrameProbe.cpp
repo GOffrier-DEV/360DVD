@@ -61,21 +61,43 @@ struct DvdFrameProbe::QueuedFrame
     unsigned width, height, calls;
     unsigned motion, dc, idct;
     double duration;
-    LONGLONG parseTicks, readTicks;
+    LONGLONG parseTicks, readTicks, inputWaitTicks;
+    LONGLONG decodeTicks, copyTicks;
+    LONGLONG worstReadTicks;
+    unsigned readCalls, readBytes;
     HRESULT status;
 };
 
 struct DvdFrameProbe::Decoder
 {
-    FILE* file;
+    CRITICAL_SECTION queueStats;
+    unsigned queuedFrames;
+    HANDLE file;
+    unsigned readCalls, readBytes;
+    LONGLONG worstReadTicks;
     mpeg2dec_t* handle;
-    BYTE input[8192];
+    enum { InputSlots = 16 };
+    struct InputChunk
+    {
+        BYTE bytes[128 * 1024];
+        size_t size;
+        bool failed;
+        LONGLONG ticks;
+    };
+    InputChunk input[InputSlots];
+    HANDLE reader, inputFree, inputReady;
+    unsigned inputIndex;
+    bool inputHeld;
+    BYTE* preload;
+    size_t preloadSize;
+    bool preloadFed;
     BYTE end[8];
     bool flushed;
-    HANDLE thread, stop, freeSlots, ready;
+    HANDLE thread, stop, freeSlots, ready, primed;
     unsigned writeIndex, readIndex, calls;
-    LONGLONG parseTicks, readTicks;
-    QueuedFrame queue[3];
+    LONGLONG parseTicks, readTicks, inputWaitTicks;
+    enum { QueueCapacity = 6 };
+    QueuedFrame queue[QueueCapacity];
 };
 
 DvdFrameProbe::DvdFrameProbe()
@@ -83,7 +105,10 @@ DvdFrameProbe::DvdFrameProbe()
       m_framesReady(0), m_lateByFrame(0), m_maxLate(0),
       m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
       m_readTicks(0), m_uploadTicks(0), m_gpuWaitTicks(0),
+      m_inputWaitTicks(0), m_lastDecodeTicks(0), m_lastCopyTicks(0),
+      m_worstReadTicks(0), m_readCalls(0), m_readBytes(0),
       m_underruns(0), m_textureSet(0),
+      m_decodeMode("MPEG-2 VMX startup not reached"),
       m_motionBlocks(0), m_dcBlocks(0), m_idctBlocks(0),
       m_vs(NULL), m_ps(NULL), m_decl(NULL)
 {
@@ -106,19 +131,54 @@ void DvdFrameProbe::CloseDecoder()
     if (!m_decoder)
         return;
     Decoder& d = *m_decoder;
+    if (d.stop)
+        SetEvent(d.stop);
     if (d.thread)
     {
-        SetEvent(d.stop);
         WaitForSingleObject(d.thread, INFINITE);
         CloseHandle(d.thread);
     }
+    if (d.reader)
+    {
+        WaitForSingleObject(d.reader, INFINITE);
+        CloseHandle(d.reader);
+    }
+    if (d.inputReady) CloseHandle(d.inputReady);
+    if (d.inputFree) CloseHandle(d.inputFree);
     if (d.ready) CloseHandle(d.ready);
+    if (d.primed) CloseHandle(d.primed);
     if (d.freeSlots) CloseHandle(d.freeSlots);
     if (d.stop) CloseHandle(d.stop);
     if (d.handle) mpeg2_close(d.handle);
-    fclose(d.file);
+    DeleteCriticalSection(&d.queueStats);
+    free(d.preload);
+    CloseHandle(d.file);
     delete m_decoder;
     m_decoder = NULL;
+}
+
+DWORD WINAPI DvdFrameProbe::ReadWorker(void* context)
+{
+    Decoder& d = *static_cast<Decoder*>(context);
+    HANDLE wait[] = {d.stop, d.inputFree};
+    unsigned index = 0;
+    while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+    {
+        Decoder::InputChunk& chunk = d.input[index];
+        LARGE_INTEGER start, end;
+        QueryPerformanceCounter(&start);
+        DWORD bytes = 0;
+        chunk.failed = !ReadFile(d.file, chunk.bytes, sizeof(chunk.bytes), &bytes, NULL);
+        chunk.size = bytes;
+        QueryPerformanceCounter(&end);
+        chunk.ticks = end.QuadPart - start.QuadPart;
+        const bool done = chunk.failed || chunk.size == 0;
+        index = (index + 1) % Decoder::InputSlots;
+        ReleaseSemaphore(d.inputReady, 1, NULL);
+        if (done)
+            break;
+    }
+    return 0;
 }
 
 DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
@@ -126,19 +186,37 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
     DvdFrameProbe& player = *static_cast<DvdFrameProbe*>(context);
     Decoder& d = *player.m_decoder;
     HANDLE wait[] = {d.stop, d.freeSlots};
+    unsigned initialFrames = 0;
     while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
     {
         QueuedFrame& frame = d.queue[d.writeIndex];
+        LARGE_INTEGER start, finish;
+        QueryPerformanceCounter(&start);
         const HRESULT status = player.NextFrame(frame);
+        QueryPerformanceCounter(&finish);
+        frame.decodeTicks = finish.QuadPart - start.QuadPart;
         frame.status = status;
         frame.calls = d.calls;
         frame.parseTicks = d.parseTicks;
         frame.readTicks = d.readTicks;
+        frame.inputWaitTicks = d.inputWaitTicks;
+        frame.worstReadTicks = d.worstReadTicks;
+        frame.readCalls = d.readCalls;
+        frame.readBytes = d.readBytes;
         frame.motion = dvd360_mpeg2_vmx_blocks();
         frame.dc = dvd360_mpeg2_vmx_dc_blocks();
         frame.idct = dvd360_mpeg2_vmx_idct_blocks();
-        d.writeIndex = (d.writeIndex + 1) % 3;
+        d.writeIndex = (d.writeIndex + 1) % Decoder::QueueCapacity;
+        if (status == S_OK)
+        {
+            EnterCriticalSection(&d.queueStats);
+            ++d.queuedFrames;
+            LeaveCriticalSection(&d.queueStats);
+        }
         ReleaseSemaphore(d.ready, 1, NULL);
+        // No consumer runs until the initial queue is full or the stream ends.
+        if (++initialFrames == Decoder::QueueCapacity || status != S_OK)
+            SetEvent(d.primed);
         if (status != S_OK)
             break;
     }
@@ -157,12 +235,21 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
     m_parseCalls = frame.calls;
     m_parseTicks = frame.parseTicks;
     m_readTicks = frame.readTicks;
+    m_inputWaitTicks = frame.inputWaitTicks;
+    m_worstReadTicks = frame.worstReadTicks;
+    m_readCalls = frame.readCalls;
+    m_readBytes = frame.readBytes;
     m_motionBlocks = frame.motion;
     m_dcBlocks = frame.dc;
     m_idctBlocks = frame.idct;
     HRESULT hr = frame.status;
     if (hr == S_OK)
     {
+        EnterCriticalSection(&d.queueStats);
+        --d.queuedFrames;
+        LeaveCriticalSection(&d.queueStats);
+        m_lastDecodeTicks = frame.decodeTicks;
+        m_lastCopyTicks = frame.copyTicks;
         const unsigned luma = frame.width * frame.height;
         const unsigned chroma = ((frame.width + 1) / 2) * ((frame.height + 1) / 2);
         const BYTE* planes[] = {frame.pixels, frame.pixels + luma, frame.pixels + luma + chroma};
@@ -177,12 +264,12 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
             if (m_untilNext < 0) m_untilNext = 0;
         }
     }
-    d.readIndex = (d.readIndex + 1) % 3;
+    d.readIndex = (d.readIndex + 1) % Decoder::QueueCapacity;
     ReleaseSemaphore(d.freeSlots, 1, NULL);
     return hr;
 }
 
-HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
+HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, HANDLE file)
 {
     const unsigned luma = kWidth * kHeight;
     const unsigned bytes = luma * 3 / 2;
@@ -190,7 +277,9 @@ HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
     if (!data)
         return E_OUTOFMEMORY;
     HRESULT hr = E_INVALIDARG;
-    if (fread(data, 1, bytes, file) == bytes && fgetc(file) == EOF && !ferror(file))
+    DWORD sizeHigh = 0, received = 0;
+    if (GetFileSize(file, &sizeHigh) == bytes && !sizeHigh &&
+        ReadFile(file, data, bytes, &received, NULL) && received == bytes)
     {
         const BYTE* planes[] = {data, data + luma, data + luma + luma / 4};
         hr = LoadPlanes(device, kWidth, kHeight, planes, kWidth);
@@ -199,7 +288,7 @@ HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
     return hr;
 }
 
-HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
+HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
 {
     LARGE_INTEGER frequency;
     if (QueryPerformanceFrequency(&frequency))
@@ -208,10 +297,37 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
     m_decoder = new Decoder();
     if (!m_decoder)
     {
-        fclose(file);
+        CloseHandle(file);
         return E_OUTOFMEMORY;
     }
     m_decoder->file = file;
+    InitializeCriticalSection(&m_decoder->queueStats);
+    FILE* ram = fopen("game:\\mpeg2-ram.enable", "rb");
+    if (ram)
+    {
+        fclose(ram);
+        const int limit = 64 * 1024 * 1024;
+        DWORD sizeHigh = 0;
+        const DWORD bytes = GetFileSize(file, &sizeHigh);
+        if (!bytes || sizeHigh || bytes > limit)
+        {
+            CloseDecoder();
+            return E_INVALIDARG;
+        }
+        m_decoder->preload = (BYTE*)malloc(bytes);
+        if (!m_decoder->preload)
+        {
+            CloseDecoder();
+            return E_OUTOFMEMORY;
+        }
+        DWORD received = 0;
+        if (!ReadFile(file, m_decoder->preload, bytes, &received, NULL) || received != bytes)
+        {
+            CloseDecoder();
+            return E_FAIL;
+        }
+        m_decoder->preloadSize = bytes;
+    }
     mpeg2_accel(0);
     m_decoder->handle = mpeg2_init();
     if (!m_decoder->handle)
@@ -219,38 +335,53 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
         CloseDecoder();
         return E_OUTOFMEMORY;
     }
-    FILE* vmx = fopen("game:\\mpeg2-vmx.enable", "rb");
-    if (vmx)
+    // Default to the console-tested VMX combination. Keep a scalar escape hatch.
+    FILE* scalar = fopen("game:\\mpeg2-scalar.enable", "rb");
+    if (scalar)
     {
-        fclose(vmx);
-        OutputDebugStringA(dvd360_mpeg2_enable_vmx()
-            ? "MPEG-2 VMX motion compensation enabled\r\n"
-            : "MPEG-2 VMX self-test failed; using scalar\r\n");
+        fclose(scalar);
+        m_decodeMode = "MPEG-2 scalar override detected";
     }
-    FILE* dc = fopen("game:\\mpeg2-vmx-dc.enable", "rb");
-    if (dc)
+    else
     {
-        fclose(dc);
-        OutputDebugStringA(dvd360_mpeg2_enable_vmx_dc()
-            ? "MPEG-2 VMX DC reconstruction enabled\r\n"
-            : "MPEG-2 VMX DC self-test failed; using scalar\r\n");
-    }
-    FILE* idct = fopen("game:\\mpeg2-vmx-idct.enable", "rb");
-    if (idct)
-    {
-        fclose(idct);
-        OutputDebugStringA(dvd360_mpeg2_enable_vmx_idct()
-            ? "MPEG-2 VMX IDCT columns enabled\r\n"
-            : "MPEG-2 VMX IDCT self-test failed; using scalar\r\n");
+        const unsigned motion = dvd360_mpeg2_enable_vmx() ? 1 : 0;
+        const unsigned dc = dvd360_mpeg2_enable_vmx_dc() ? 2 : 0;
+        const unsigned idct = dvd360_mpeg2_enable_vmx_idct() ? 4 : 0;
+        static const char* const modes[] = {
+            "MPEG-2 VMX default: no self-tests passed",
+            "MPEG-2 VMX default: motion",
+            "MPEG-2 VMX default: DC",
+            "MPEG-2 VMX default: motion + DC",
+            "MPEG-2 VMX default: IDCT",
+            "MPEG-2 VMX default: motion + IDCT",
+            "MPEG-2 VMX default: DC + IDCT",
+            "MPEG-2 VMX default: motion + DC + IDCT"
+        };
+        m_decodeMode = modes[motion | dc | idct];
     }
     const BYTE end[] = {0, 0, 1, 0xB7, 0, 0, 1, 0xB7};
     memcpy(m_decoder->end, end, sizeof(end));
     m_decoder->stop = CreateEvent(NULL, TRUE, FALSE, NULL);
-    m_decoder->freeSlots = CreateSemaphore(NULL, 3, 3, NULL);
-    m_decoder->ready = CreateSemaphore(NULL, 0, 3, NULL);
-    if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready)
-        m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
-    HRESULT hr = m_decoder->thread ? Consume(device, INFINITE) : E_FAIL;
+    const LONG capacity = Decoder::QueueCapacity;
+    m_decoder->freeSlots = CreateSemaphore(NULL, capacity, capacity, NULL);
+    m_decoder->ready = CreateSemaphore(NULL, 0, capacity, NULL);
+    m_decoder->primed = CreateEvent(NULL, TRUE, FALSE, NULL);
+    m_decoder->inputFree = CreateSemaphore(NULL, Decoder::InputSlots, Decoder::InputSlots, NULL);
+    m_decoder->inputReady = CreateSemaphore(NULL, 0, Decoder::InputSlots, NULL);
+    if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready && m_decoder->primed)
+    {
+        if (!m_decoder->preload && m_decoder->inputFree && m_decoder->inputReady)
+            m_decoder->reader = CreateThread(NULL, 0, ReadWorker, m_decoder, 0, NULL);
+        if (m_decoder->preload || m_decoder->reader)
+            m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
+    }
+    HRESULT hr = E_FAIL;
+    if (m_decoder->thread)
+    {
+        HANDLE wait[] = {m_decoder->primed, m_decoder->thread};
+        if (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
+            hr = Consume(device, 0);
+    }
     if (hr != S_OK)
         CloseDecoder();
     return hr == S_FALSE ? E_FAIL : hr;
@@ -281,6 +412,23 @@ double DvdFrameProbe::ParseMilliseconds() const
 
 double DvdFrameProbe::ReadMilliseconds() const
 { return m_parseFrequency ? m_readTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::InputWaitMilliseconds() const
+{ return m_parseFrequency ? m_inputWaitTicks * 1000.0 / m_parseFrequency : 0.0; }
+unsigned DvdFrameProbe::QueueDepth() const
+{
+    if (!m_decoder)
+        return 0;
+    EnterCriticalSection(&m_decoder->queueStats);
+    const unsigned depth = m_decoder->queuedFrames;
+    LeaveCriticalSection(&m_decoder->queueStats);
+    return depth;
+}
+double DvdFrameProbe::LastDecodeMilliseconds() const
+{ return m_parseFrequency ? m_lastDecodeTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::LastCopyMilliseconds() const
+{ return m_parseFrequency ? m_lastCopyTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::WorstReadMilliseconds() const
+{ return m_parseFrequency ? m_worstReadTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::UploadMilliseconds() const
 { return m_parseFrequency ? m_uploadTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::GpuWaitMilliseconds() const
@@ -303,15 +451,51 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         {
             if (stream.flushed)
                 return S_FALSE;
-            QueryPerformanceCounter(&start);
-            const size_t size = fread(stream.input, 1, sizeof(stream.input), stream.file);
-            QueryPerformanceCounter(&finish);
-            stream.readTicks += finish.QuadPart - start.QuadPart;
-            if (ferror(stream.file))
-                return E_FAIL;
-            if (size)
+            if (stream.preload)
             {
-                mpeg2_buffer(decoder, stream.input, stream.input + size);
+                if (!stream.preloadFed)
+                {
+                    stream.preloadFed = true;
+                    mpeg2_buffer(decoder, stream.preload, stream.preload + stream.preloadSize);
+                }
+                else
+                {
+                    stream.flushed = true;
+                    mpeg2_buffer(decoder, stream.end, stream.end + sizeof(stream.end));
+                }
+                continue;
+            }
+            // libmpeg2 owns the previous input pointer until STATE_BUFFER.
+            if (stream.inputHeld)
+            {
+                stream.inputHeld = false;
+                stream.inputIndex = (stream.inputIndex + 1) % Decoder::InputSlots;
+                ReleaseSemaphore(stream.inputFree, 1, NULL);
+            }
+            HANDLE wait[] = {stream.stop, stream.inputReady};
+            DWORD available = WaitForMultipleObjects(2, wait, FALSE, 0);
+            if (available == WAIT_TIMEOUT)
+            {
+                QueryPerformanceCounter(&start);
+                available = WaitForMultipleObjects(2, wait, FALSE, INFINITE);
+                QueryPerformanceCounter(&finish);
+                stream.inputWaitTicks += finish.QuadPart - start.QuadPart;
+            }
+            if (available != WAIT_OBJECT_0 + 1)
+                return E_FAIL;
+            const Decoder::InputChunk& chunk = stream.input[stream.inputIndex];
+            stream.readTicks += chunk.ticks;
+            ++stream.readCalls;
+            stream.readBytes += (unsigned)chunk.size;
+            if (chunk.ticks > stream.worstReadTicks)
+                stream.worstReadTicks = chunk.ticks;
+            stream.inputHeld = true;
+            if (chunk.failed)
+                return E_FAIL;
+            if (chunk.size)
+            {
+                BYTE* bytes = stream.input[stream.inputIndex].bytes;
+                mpeg2_buffer(decoder, bytes, bytes + chunk.size);
             }
             else
             {
@@ -343,15 +527,28 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
                 : 1.0 / 25.0;
             frame.width = seq->picture_width;
             frame.height = seq->picture_height;
+            LARGE_INTEGER copyStart, copyEnd;
+            QueryPerformanceCounter(&copyStart);
             BYTE* dest = frame.pixels;
             for (unsigned i = 0; i < 3; ++i)
             {
                 const unsigned width = i ? (frame.width + 1) / 2 : frame.width;
                 const unsigned height = i ? (frame.height + 1) / 2 : frame.height;
                 const unsigned stride = i ? seq->chroma_width : seq->width;
-                for (unsigned row = 0; row < height; ++row, dest += width)
-                    memcpy(dest, planes[i] + row * stride, width);
+                if (stride == width)
+                {
+                    const unsigned planeBytes = width * height;
+                    memcpy(dest, planes[i], planeBytes);
+                    dest += planeBytes;
+                }
+                else
+                {
+                    for (unsigned row = 0; row < height; ++row, dest += width)
+                        memcpy(dest, planes[i] + row * stride, width);
+                }
             }
+            QueryPerformanceCounter(&copyEnd);
+            frame.copyTicks = copyEnd.QuadPart - copyStart.QuadPart;
             return S_OK;
         }
     }

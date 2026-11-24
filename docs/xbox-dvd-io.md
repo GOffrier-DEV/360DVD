@@ -1,11 +1,15 @@
 # Xbox 360 DVD device I/O findings
 
+> Historical reverse-engineering reference. The shipped port implements the
+> DVD controls used for CSS authentication in `port/xbox360/dvdcss_ioctl.c`
+> and uses libdvdnav/libdvdread for navigation. The constraints below still
+> apply when changing that backend.
+
 This note records DVD-device paths observed in the `xamd.dll`, `xboxkrnld.exe`,
 `xboxkrnlc.exe`, and `xboxkrnlct.exe` IDA databases. The kernel builds examined
 have matching control dispatch and packet-handler logic for the paths described
 here. The C kernel database also exposed additional read-path details below.
-This is a reverse-engineering reference, not a claim that every request is safe
-or supported on every console/kernel revision. The XAM image was based at
+The XAM image was based at
 `0x815F0000`; the kernel images were based at `0x80040000`.
 
 ## Summary
@@ -122,7 +126,7 @@ kernel passes the CDB beginning at `+20` to `SataCdRomIssueAtapiRequest`.
 
 The handler contains a special check for pending SSC state and CDB lengths 8
 or 40. Do not infer from that special case that those are the only accepted
-CDB lengths; validate the exact header semantics for the target kernel before
+CDB lengths; check the exact header semantics for the target kernel before
 using pass-through in the player.
 
 ## Sector reads
@@ -146,11 +150,11 @@ The C kernel build exposes two distinct paths:
   acceptable output-buffer address. The mode selects the READ CD sector
   selection bits; this is not the ordinary 2048-byte filesystem-read API.
 
-For a first physical-drive probe, the normal 2048-byte-aligned IRP read path is
-the simpler candidate. Start with a known in-range sector and one sector, use
-a suitably aligned buffer, and validate the actual completion status and byte
-count on-console. The raw-read control has mode-specific packet fields and
-should be treated as a separate experiment.
+The normal 2048-byte-aligned IRP read path is the simpler candidate for
+drive access. Use a known in-range sector, one sector at a time, and a
+suitably aligned buffer, and check the actual completion status and byte
+count. The raw-read control has mode-specific packet fields and should be
+treated as a separate path.
 
 ## XAM behavior
 
@@ -177,14 +181,13 @@ the raw packet request ABI.
 - Keep the Xbox drive transport behind the DVD input/device boundary; do not
   use desktop Win32 DVD ioctl behavior as the Xbox backend.
 - The DVD-specific controls are the most direct known route for their matching
-  operations. Use pass-through only when needed and after verifying its full
-  request layout and permissions on the target kernel.
+  operations. Use pass-through only when needed, with its full request layout
+  and permissions confirmed for the target kernel.
 - Preserve even transfer lengths and buffer alignment constraints. Check
   status, actual transfer length, and sense/error behavior rather than treating
   a successful request submission as a successful read.
-- The findings establish request construction in this kernel build, not
-  successful behavior on a physical drive. Begin console validation with
-  harmless/read-only requests and aligned sector reads.
+- Prefer harmless/read-only requests and aligned sector reads when extending
+  the backend.
 - CSS protocol logic remains the responsibility of libdvdcss. This note records
   the platform transport interface, not CSS keys or authentication policy.
 - Kernel addresses and observed behavior may differ across kernel revisions.

@@ -19,18 +19,10 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <PlatformToolset>clang</PlatformToolset>
-    <RxdkClangXdkHeaders>true</RxdkClangXdkHeaders>
-    <RxdkClangCStd>c11</RxdkClangCStd>
-    <RxdkClangCppStd>c++14</RxdkClangCppStd>
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <PlatformToolset>clang</PlatformToolset>
-    <RxdkClangXdkHeaders>true</RxdkClangXdkHeaders>
-    <RxdkClangCStd>c11</RxdkClangCStd>
-    <RxdkClangCppStd>c++14</RxdkClangCppStd>
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <PropertyGroup>
@@ -38,7 +30,6 @@
     <OutDir>$(MSBuildProjectDirectory)\build\$(Configuration)\</OutDir>
     <IntDir>$(MSBuildProjectDirectory)\build\obj\$(Configuration)\</IntDir>
     <TargetName>360DVD</TargetName>
-    <DvdLibraries Condition="'$(DvdLibraries)' == ''">$(MSBuildProjectDirectory)\build\libdvd360.a</DvdLibraries>
     <ImageXexOutput>$(OutDir)360DVD.xex</ImageXexOutput>
     <LinkIncremental>false</LinkIncremental>
     <RemoteRoot>hdd:\360DVD</RemoteRoot>
@@ -52,14 +43,13 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <CompileAs>CompileAsC</CompileAs>
       <WarningLevel>Level3</WarningLevel>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <ExceptionHandling>false</ExceptionHandling>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalIncludeDirectories>port\xbox360\include;port\xbox360;deps\libdvdread\src;deps\libdvdread\src\dvdread;deps\libdvdread\src\file;deps\libdvdnav\src;deps\libdvdnav\src\dvdnav;deps\libdvdnav\src\vm;deps\libdvdcss\src;deps\libdvdcss\src\dvdcss;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_XBOX;XBOX;HAVE_CONFIG_H;_XBOX_CRT_DEPRECATE_INSECURE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_XBOX;XBOX;_XBOX_CRT_DEPRECATE_INSECURE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -81,7 +71,7 @@
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xapilibd.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xapilibd.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">
@@ -95,26 +85,18 @@
     </ClCompile>
     <Link>
       <AdditionalOptions>/ignore:4089 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);d3d9.lib;d3dx9.lib;xgraphics.lib;xapilib.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d9.lib;d3dx9.lib;xgraphics.lib;xapilib.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <SetChecksum>true</SetChecksum>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\main.cpp">
-      <CompileAs>CompileAsCpp</CompileAs>
-    </ClCompile>
-    <ClCompile Include="src\DvdLogoBounce.cpp">
-      <CompileAs>CompileAsCpp</CompileAs>
-    </ClCompile>
-    <ClCompile Include="src\XboxDvdStream.cpp">
-      <CompileAs>CompileAsCpp</CompileAs>
-    </ClCompile>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\DvdLogoBounce.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\DvdLogoBounce.h" />
-    <ClInclude Include="src\XboxDvdStream.h" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="media\dvd-video-logo.bmp">

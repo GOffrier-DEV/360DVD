@@ -21,7 +21,7 @@ public:
                     const BYTE* palette, unsigned colors);
 
 private:
-    struct Vertex { float x, y, z, w; DWORD color; float u, v; };
+    struct Vertex { float x, y, z, w; DWORD color; float u, v, halfW, halfH, radius; };
     void Rect(float x, float y, float w, float h, DWORD color);
     void Panel(float x, float y, float w, float h, float radius, DWORD top, DWORD bottom);
     void Quad(float x, float y, float w, float h, DWORD color, float u0, float v0, float u1, float v1);

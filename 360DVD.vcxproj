@@ -141,8 +141,8 @@
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="tools\build-osd-atlas.ps1">
-      <Message>Building antialiased playback font and controller glyphs</Message>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "%(FullPath)" "$(OutDir)Media\playback-osd.atlas"</Command>
+      <Message>Building antialiased playback font and dashboard button glyphs</Message>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "%(FullPath)" "$(OutDir)Media\playback-osd.atlas" -DashboardAssets "%USERPROFILE%\Downloads\shrdres.xzp(unpacked)"</Command>
       <Outputs>$(OutDir)Media\playback-osd.atlas</Outputs>
     </CustomBuild>
     <CustomBuild Include="media\dvd-video-logo.bmp">

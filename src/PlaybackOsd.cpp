@@ -7,11 +7,22 @@
 namespace
 {
     enum { AtlasWidth = 512, AtlasHeight = 256, CellSize = 32 };
-    const char kVs[] = "void main(float4 p:POSITION,float4 c:COLOR0,float2 uv:TEXCOORD0,"
-        "out float4 pos:POSITION,out float4 col:COLOR0,out float2 tc:TEXCOORD0){pos=p;col=c;tc=uv;}";
+    const char kVs[] = "void main(float4 p:POSITION,float4 c:COLOR0,float2 uv:TEXCOORD0,float3 box:TEXCOORD1,"
+        "out float4 pos:POSITION,out float4 col:COLOR0,out float2 tc:TEXCOORD0,out float3 b:TEXCOORD1)"
+        "{pos=p;col=c;tc=uv;b=box;}";
     const char kPs[] = "sampler2D atlas:register(s0);"
-        "float4 main(float4 c:COLOR0,float2 uv:TEXCOORD0):COLOR0"
-        "{return float4(c.rgb,c.a*tex2D(atlas,uv).r);}";
+        "float4 main(float4 c:COLOR0,float2 uv:TEXCOORD0,float3 box:TEXCOORD1):COLOR0"
+        "{float2 q=abs(uv)-box.xy+box.z;"
+        "float d=length(max(q,0))+min(max(q.x,q.y),0)-box.z;"
+        "float edge=saturate(0.5-d/max(fwidth(d),0.001));"
+        "if(box.x>0)return float4(c.rgb,c.a*edge);"
+        "float a=tex2D(atlas,uv).r;float slot=floor(uv.x*16);"
+        "if(uv.y<0.125 && slot>=1 && slot<=6){"
+        "float button=slot<=4?slot-1:slot-5;"
+        "float2 p=uv+(slot<=2?float2((7+2*slot)/16,0):float2((3*button-slot)/16,0.125));"
+        "return float4(tex2D(atlas,p).r,tex2D(atlas,p+float2(0.0625,0)).r,"
+        "tex2D(atlas,p+float2(0.125,0)).r,c.a*a);}"
+        "return float4(c.rgb,c.a*a);}";
 
     void Clock(char* text, size_t size, double seconds)
     {
@@ -19,17 +30,6 @@ namespace
         sprintf_s(text, size, "%02u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
     }
 
-    DWORD MixColor(DWORD a, DWORD b, float fraction)
-    {
-        DWORD result = 0;
-        for (unsigned shift = 0; shift < 32; shift += 8)
-        {
-            const float from = float((a >> shift) & 255);
-            const float to = float((b >> shift) & 255);
-            result |= static_cast<DWORD>(from + (to - from) * fraction + 0.5f) << shift;
-        }
-        return result;
-    }
 }
 
 PlaybackOsd::PlaybackOsd() : m_vs(NULL), m_ps(NULL), m_decl(NULL), m_atlas(NULL), m_selected(0),
@@ -86,6 +86,7 @@ HRESULT PlaybackOsd::Open(IDirect3DDevice9* device)
         {0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
         {0, 16, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0},
         {0, 20, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},
+        {0, 28, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1},
         D3DDECL_END()
     };
     return device->CreateVertexDeclaration(elements, &m_decl);
@@ -150,28 +151,22 @@ void PlaybackOsd::Rect(float x, float y, float w, float h, DWORD color)
 
 void PlaybackOsd::Panel(float x, float y, float w, float h, float radius, DWORD top, DWORD bottom)
 {
-    // Sample quarter-circle corners; interpolate the body as one gradient.
-    const float offsets[] = {1.0f, 0.339f, 0.134f, 0.032f, 0.0f, 0.0f, 0.032f, 0.134f, 0.339f, 1.0f};
-    const float rows[] = {0, radius*.25f, radius*.5f, radius*.75f, radius,
-                          h-radius, h-radius*.75f, h-radius*.5f, h-radius*.25f, h};
-    const float u = 0.5f / AtlasWidth, v = 0.5f / AtlasHeight;
-    for (unsigned i = 0; i + 1 < sizeof(rows) / sizeof(*rows); ++i)
-    {
-        if (rows[i] == rows[i+1]) continue;
-        if (m_count + 6 > sizeof(m_vertices) / sizeof(*m_vertices)) return;
-        const float l = (x + radius * offsets[i]) / 640 - 1;
-        const float r = (x + w - radius * offsets[i]) / 640 - 1;
-        const float nl = (x + radius * offsets[i+1]) / 640 - 1;
-        const float nr = (x + w - radius * offsets[i+1]) / 640 - 1;
-        const float t = 1 - (y + m_panelOffset + rows[i]) / 360;
-        const float b = 1 - (y + m_panelOffset + rows[i+1]) / 360;
-        const DWORD a = MixColor(top, bottom, rows[i] / h);
-        const DWORD z = MixColor(top, bottom, rows[i+1] / h);
-        const Vertex strip[] = {{l,t,0,1,a,u,v},{r,t,0,1,a,u,v},{nl,b,0,1,z,u,v},
-                                {nl,b,0,1,z,u,v},{r,t,0,1,a,u,v},{nr,b,0,1,z,u,v}};
-        memcpy(m_vertices + m_count, strip, sizeof(strip));
-        m_count += 6;
-    }
+    if (m_count + 6 > sizeof(m_vertices) / sizeof(*m_vertices)) return;
+    const float halfW = w * 0.5f, halfH = h * 0.5f;
+    if (radius > halfW) radius = halfW;
+    if (radius > halfH) radius = halfH;
+    // Leave room outside the shape for the shader's coverage ramp.
+    const float u = halfW + 2, v = halfH + 2;
+    const float l = (x - 2) / 640 - 1, r = (x + w + 2) / 640 - 1;
+    const float t = 1 - (y + m_panelOffset - 2) / 360;
+    const float b = 1 - (y + m_panelOffset + h + 2) / 360;
+    const Vertex tl = {l,t,0,1,top,-u,-v,halfW,halfH,radius};
+    const Vertex tr = {r,t,0,1,top, u,-v,halfW,halfH,radius};
+    const Vertex bl = {l,b,0,1,bottom,-u,v,halfW,halfH,radius};
+    const Vertex br = {r,b,0,1,bottom, u,v,halfW,halfH,radius};
+    const Vertex quad[] = {tl,tr,bl,bl,tr,br};
+    memcpy(m_vertices + m_count, quad, sizeof(quad));
+    m_count += 6;
 }
 
 void PlaybackOsd::Quad(float x, float y, float w, float h, DWORD color,
@@ -197,8 +192,10 @@ void PlaybackOsd::Text(float x, float y, const char* text, DWORD color, float sc
         const float u = float((glyph % 16) * CellSize) / AtlasWidth;
         const float v = float((glyph / 16) * CellSize) / AtlasHeight;
         if (glyph != ' ')
+        {
             Quad(x, y, CellSize * scale, CellSize * scale, color,
                  u, v, u + float(CellSize) / AtlasWidth, v + float(CellSize) / AtlasHeight);
+        }
         x += m_widths[glyph] * scale;
     }
 }

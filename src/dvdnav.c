@@ -870,7 +870,9 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
       if ((this->position_current.still || this->pci.hli.hl_gi.hli_ss) && !this->sync_wait_skip)
         this->sync_wait = 1;
 
-      if(!this->position_current.still || this->skip_still ) {
+      /* Keep the current PGC active while the player drains interactive
+       * output, so a button on the presented cell can still execute. */
+      if((!this->position_current.still || this->skip_still) && !this->sync_wait) {
         /* no active cell still -> get us to the next cell */
         vm_get_next_cell(this->vm);
         this->position_current.still = 0; /* still gets activated at end of cell */
@@ -1131,6 +1133,24 @@ uint16_t dvdnav_spu_stream_to_lang(dvdnav_t *this, uint8_t stream) {
 
   return attr.lang_code;
 }
+
+#ifdef DVD360_XBOX
+/* Polled by the Xbox reader thread after executing a menu command. */
+int dvdnav_xbox_menu_transition(dvdnav_t *this, int was_still) {
+  return this->vm->hop_channel != this->position_current.hop_channel ||
+         (was_still && !this->position_current.still);
+}
+
+void dvdnav_xbox_cell_location(dvdnav_t *this, int *domain, int *vts, int *pgc) {
+  *domain = this->vm->state.domain;
+  *vts = this->vm->state.vtsN;
+  *pgc = this->vm->state.pgcN;
+}
+
+int dvdnav_xbox_selected_button(dvdnav_t *this) {
+  return this->vm->state.HL_BTNN_REG >> 10;
+}
+#endif
 
 int8_t dvdnav_get_audio_logical_stream(dvdnav_t *this, uint8_t audio_num) {
   int8_t       retval;

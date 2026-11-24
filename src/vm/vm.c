@@ -429,7 +429,12 @@ int vm_reset(vm_t *vm, const char *dvdroot,
     if(dvdroot)
         vm->dvd = DVDOpen2(vm, p_dvdread_logcb, dvdroot);
     else if(vm->priv && vm->dvdstreamcb.pf_read)
+#ifdef DVD360_XBOX
+        /* Keep the transport callback identity and context for CSS ioctls. */
+        vm->dvd = DVDOpenStream(vm->priv, stream_cb);
+#else
         vm->dvd = DVDOpenStream2(vm, p_dvdread_logcb, &vm->dvdstreamcb);
+#endif
 #else
       if(dvdroot)
           vm->dvd = DVDOpen(dvdroot);

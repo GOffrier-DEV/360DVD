@@ -234,6 +234,10 @@ static const btni_t *get_current_button(dvdnav_t *this, pci_t *pci) {
   }
 
   button = this->vm->state.HL_BTNN_REG >> 10;
+  if (button <= 0 || button > pci->hli.hl_gi.btn_ns) {
+    printerr("Current button is out of range.");
+    return NULL;
+  }
 #ifdef BUTTON_TESTING
   nav_print_PCI(pci);
 #endif

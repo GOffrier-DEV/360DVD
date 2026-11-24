@@ -3,7 +3,8 @@ param(
     [string]$RxdkRoot = 'C:\Program Files\RXDK-360',
     [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe',
     [switch]$FfmpegProbe,
-    [switch]$FfmpegAltivec
+    [switch]$FfmpegAltivec,
+    [string]$BladesXuiSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,3 +119,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Built: $(Join-Path $output '360DVD.xex')"
+if ($BladesXuiSource) {
+    & (Join-Path $PSScriptRoot 'tools\prepare-blades-xui.ps1') `
+        -Source $BladesXuiSource -Output (Join-Path $output 'Media\Blades') -RxdkRoot $RxdkRoot
+}

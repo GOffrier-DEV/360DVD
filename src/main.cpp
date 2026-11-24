@@ -75,6 +75,7 @@ namespace
 
         HRESULT Start() { return voice->Start(0); }
         HRESULT SetPaused(bool paused) { return paused ? voice->Stop(0) : voice->Start(0); }
+        HRESULT SetMuted(bool muted) { return voice->SetVolume(muted ? 0.0f : 1.0f); }
         double Advance(bool& drained)
         {
             XAUDIO2_VOICE_STATE state;
@@ -241,7 +242,7 @@ namespace
         ProbeLog("CSS auth probe starting", 0, authLog);
         if (!start || start > INT_MAX - 128 || size < DVDCSS_BLOCK_SIZE)
         {
-            ProbeLog("CSS probe VOB not found");
+            ProbeLog("CSS probe VOB not found", 0, authLog);
             return;
         }
 
@@ -347,7 +348,14 @@ namespace
                     DVDCloseFile(ifo);
                 }
                 uint32_t vobSize = 0;
-                const uint32_t vobStart = UDFFindFile(reader, "/VIDEO_TS/VTS_01_1.VOB", &vobSize);
+                uint32_t vobStart = UDFFindFile(reader, "/VIDEO_TS/VTS_01_1.VOB", &vobSize);
+                for (unsigned titleSet = 2; (!vobStart || vobSize < DVDCSS_BLOCK_SIZE) &&
+                     titleSet <= 99; ++titleSet)
+                {
+                    char path[32];
+                    sprintf_s(path, sizeof(path), "/VIDEO_TS/VTS_%02u_1.VOB", titleSet);
+                    vobStart = UDFFindFile(reader, path, &vobSize);
+                }
                 DVDClose(reader);
                 // Read raw sectors beyond 2 GiB without requesting CSS decryption.
                 const unsigned long long offset = 0x80008000ULL;
@@ -382,13 +390,12 @@ namespace
                         else
                         {
                             ProbeLog("libdvdcss read matched past 2 GiB");
-                            dvdcss_close(css);
-                            ProbeCss(dvdStream, vobStart, vobSize);
-                            return 0;
                         }
                         dvdcss_close(css);
                     }
                 }
+                // A short disc can fail the 2 GiB diagnostic and still use CSS.
+                ProbeCss(dvdStream, vobStart, vobSize);
             }
             else if (bytesRead == 0)
                 ProbeLog("read returned no data");
@@ -536,13 +543,10 @@ namespace
             PlaybackAffinity::Pin(PlaybackAffinity::Renderer);
             BootLog("Playback affinity: render=5 decode=2 reader=0");
         }
-        XVIDEO_MODE videoMode;
-        XGetVideoMode(&videoMode);
-
         D3DPRESENT_PARAMETERS present;
         ZeroMemory(&present, sizeof(present));
-        present.BackBufferWidth = videoMode.fIsWideScreen ? 1280 : 960;
-        present.BackBufferHeight = 720;
+        present.BackBufferWidth = PlaybackOsd::SceneWidth;
+        present.BackBufferHeight = PlaybackOsd::SceneHeight;
         present.BackBufferFormat = D3DFMT_A8R8G8B8;
         present.BackBufferCount = 1;
         present.MultiSampleType = D3DMULTISAMPLE_NONE;
@@ -594,12 +598,12 @@ namespace
         bool showFrame = false;
         HANDLE fixture = CreateFileA("game:\\dvd-video.vob", GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        const bool vob = fixture != INVALID_HANDLE_VALUE;
+        bool vob = fixture != INVALID_HANDLE_VALUE;
         if (!vob)
             fixture = CreateFileA("game:\\mpeg2-probe.m2v", GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         const DWORD openError = fixture == INVALID_HANDLE_VALUE ? GetLastError() : 0;
-        const bool compressed = fixture != INVALID_HANDLE_VALUE;
+        bool compressed = fixture != INVALID_HANDLE_VALUE;
         FILE* readOnly = compressed && !vob ? fopen("game:\\mpeg2-readbench.enable", "rb") : NULL;
         if (readOnly)
         {
@@ -610,11 +614,31 @@ namespace
             device->Release();
             return 0;
         }
+        bool discPlayback = false;
         if (!compressed)
         {
-            BootLog("Could not open game:\\mpeg2-probe.m2v", HRESULT_FROM_WIN32(openError));
-            fixture = CreateFileA("game:\\dvd-frame.yuv", GENERIC_READ,
-                FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            BootLog("Opening optical DVD at First Play");
+            device->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+            if (SUCCEEDED(device->BeginScene()))
+            {
+                animation.Render();
+                device->EndScene();
+                device->Present(NULL, NULL, NULL, NULL);
+            }
+            const HRESULT discStatus = frame.DecodeMpeg2(device, INVALID_HANDLE_VALUE);
+            discPlayback = discStatus == S_OK;
+            BootLog(discPlayback ? "DVD First Play stream primed" : "DVD First Play startup failed",
+                    discStatus);
+            if (discPlayback)
+            {
+                showFrame = compressed = vob = true;
+            }
+            else
+            {
+                BootLog("Could not open game:\\mpeg2-probe.m2v", HRESULT_FROM_WIN32(openError));
+                fixture = CreateFileA("game:\\dvd-frame.yuv", GENERIC_READ,
+                    FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            }
         }
         if (fixture != INVALID_HANDLE_VALUE)
         {
@@ -623,18 +647,20 @@ namespace
             if (!compressed)
                 CloseHandle(fixture);
             showFrame = SUCCEEDED(frameStatus);
-            if (compressed)
-                BootLog(frame.DecodeMode());
-                unsigned queued, target, budget;
-                frame.StartupVideoBuffer(queued, target, budget);
-                char startup[128];
-                sprintf_s(startup, sizeof(startup),
-                          "Startup video bytes: queued=%u target=%u budget=%u slice_threads=%u",
-                          queued, target, budget, frame.ActiveSliceThreads());
-                BootLog(startup);
             BootLog(compressed ? (showFrame ? "CPU MPEG-2 frame ready" : "CPU MPEG-2 probe failed")
                                : (showFrame ? "YUV test frame ready" : "YUV test frame failed"),
                     frameStatus);
+        }
+        if (compressed && showFrame)
+        {
+            BootLog(frame.DecodeMode());
+            unsigned queued, target, budget;
+            frame.StartupVideoBuffer(queued, target, budget);
+            char startup[128];
+            sprintf_s(startup, sizeof(startup),
+                      "Startup video bytes: queued=%u target=%u budget=%u slice_threads=%u",
+                      queued, target, budget, frame.ActiveSliceThreads());
+            BootLog(startup);
         }
         ProbeAudio audio;
         const HRESULT audioOpen = showFrame && compressed && !vob ? audio.Open() : S_FALSE;
@@ -642,17 +668,26 @@ namespace
             BootLog("PCM fixture unavailable; using performance counter", audioOpen);
         bool audioMaster = false;
         bool embeddedAudio = false;
-        // Keep synchronous optical I/O off the render thread.
-        ProbeLog("starting probe thread");
-        HANDLE probeThread = CreateThread(NULL, 0, ProbeDvd, NULL, 0, NULL);
-        if (probeThread)
-            CloseHandle(probeThread);
-        else
-            ProbeLog("thread creation failed", GetLastError());
+        // Do not run a second authentication session during playback.
+        if (!discPlayback)
+        {
+            ProbeLog("starting probe thread");
+            HANDLE probeThread = CreateThread(NULL, 0, ProbeDvd, NULL, 0, NULL);
+            if (probeThread)
+                CloseHandle(probeThread);
+            else
+                ProbeLog("thread creation failed", GetLastError());
+        }
         static PlaybackOsd osd;
-        const unsigned subtitleCount = frame.SubtitleCount();
+        unsigned subtitleCount = frame.SubtitleCount();
         const HRESULT osdStatus = showFrame && compressed ? osd.Open(device) : S_FALSE;
         const bool osdReady = osdStatus == S_OK;
+        if (osdReady)
+        {
+            const char* stage;
+            const HRESULT stockStatus = osd.OpenStock(device, &present, stage);
+            BootLog(stage, stockStatus);
+        }
         if (FAILED(osdStatus))
             BootLog("Playback overlay unavailable", osdStatus);
         if (osdReady)
@@ -664,9 +699,14 @@ namespace
         }
         bool paused = false;
         unsigned displayMode = 0;
+        unsigned unzoomedMode = 0;
+        bool muted = false;
         unsigned subtitle = 0;
         double playbackSeconds = 0;
-        const double playbackDuration = frame.DurationSeconds();
+        double playbackDuration = frame.DurationSeconds();
+        unsigned discSegment = frame.DiscSegment();
+        bool seeking = false;
+        double seekTarget = 0, repeatA = -1, repeatB = -1;
         LARGE_INTEGER frequency;
         LARGE_INTEGER previous;
         QueryPerformanceFrequency(&frequency);
@@ -686,6 +726,7 @@ namespace
         char audioStartLog[96] = {};
         HRESULT audioStartStatus = S_OK;
         bool pcmDrained = false;
+        bool switchingAudio = false;
 
         for (;;)
         {
@@ -696,13 +737,59 @@ namespace
             previous = now;
 
             bool playbackEnded = false;
+            bool userStopped = false;
             bool resumed = false;
-            if (osdReady && capture && showFrame && playbackClockStarted)
+            if (switchingAudio)
             {
-                const PlaybackOsd::Action action = osd.Update(elapsed, paused);
-                if (action == PlaybackOsd::TogglePause)
+                const HRESULT status = frame.PollAudioTrack(paused, muted);
+                if (status != E_PENDING)
                 {
-                    const HRESULT result = embeddedAudio ? frame.SetEmbeddedAudioPaused(!paused)
+                    switchingAudio = false;
+                    resumed = status == S_OK;
+                    osd.ShowTrackPopup(false, 0, frame.TrackLanguage(false), muted);
+                    playbackLog.Publish(status == S_OK ? "Audio track switched" :
+                        status == S_FALSE ? "No alternate audio track opened" : "Audio track start failed");
+                }
+            }
+            if (seeking)
+            {
+                const HRESULT status = frame.PollSeek();
+                if (status != S_FALSE)
+                {
+                    seeking = false;
+                    if (SUCCEEDED(status))
+                    {
+                        playbackSeconds = seekTarget;
+                        frame.Advance(device, 0, false);
+                        if (embeddedAudio && !paused)
+                            frame.StartEmbeddedAudio();
+                        resumed = true;
+                    }
+                    else
+                    {
+                        repeatA = repeatB = -1;
+                        if (embeddedAudio && !paused) frame.SetEmbeddedAudioPaused(false);
+                        BootLog("Playback seek failed", status);
+                    }
+                }
+            }
+            double requestedPosition = -1;
+            if (!seeking && !switchingAudio && osdReady && capture && showFrame && playbackClockStarted)
+            {
+                const DvdMenuState menu = frame.DiscMenuState();
+                const PlaybackOsd::Action action = osd.Update(elapsed, paused, menu.buttons, menu.stillSeconds != 0);
+                if (action >= PlaybackOsd::DiscUp && action <= PlaybackOsd::DiscContinue)
+                {
+                    static const DvdMenuCommand commands[] = {
+                        DvdMenuUp, DvdMenuDown, DvdMenuLeft, DvdMenuRight,
+                        DvdMenuActivate, DvdMenuRoot, DvdMenuTitle, DvdMenuContinue
+                    };
+                    frame.DiscMenuInput(commands[action - PlaybackOsd::DiscUp]);
+                }
+                else if (action == PlaybackOsd::TogglePause)
+                {
+                    const HRESULT result = frame.DiscTransitionPending() ? S_OK :
+                        embeddedAudio ? frame.SetEmbeddedAudioPaused(!paused)
                         : audioMaster ? audio.SetPaused(!paused) : S_OK;
                     if (SUCCEEDED(result))
                     {
@@ -710,23 +797,102 @@ namespace
                         resumed = !paused;
                     }
                 }
+                else if (action == PlaybackOsd::Stop)
+                {
+                    userStopped = playbackEnded = true;
+                    showFrame = false;
+                    if (audioMaster) audio.SetPaused(true);
+                    frame.Stop();
+                    repeatA = repeatB = -1;
+                }
                 else if (action == PlaybackOsd::DisplayMode)
                     displayMode = (displayMode + 1) % PlaybackOsd::DisplayModeCount;
+                else if (action == PlaybackOsd::ToggleZoom)
+                {
+                    if (displayMode == PlaybackOsd::StockZoomMode)
+                        displayMode = unzoomedMode;
+                    else
+                    {
+                        unzoomedMode = displayMode;
+                        displayMode = PlaybackOsd::StockZoomMode;
+                    }
+                }
+                else if (action == PlaybackOsd::NextAudioTrack)
+                {
+                    switchingAudio = !paused && embeddedAudio && frame.RequestNextAudioTrack();
+                    if (!switchingAudio)
+                        osd.ShowTrackPopup(false, 0, frame.TrackLanguage(false), muted);
+                }
                 else if (action == PlaybackOsd::SubtitleTrack)
+                {
+                    subtitleCount = frame.SubtitleCount();
                     subtitle = (subtitle + 1) % (subtitleCount + 1);
+                    osd.ShowTrackPopup(true, subtitle,
+                        subtitleCount ? frame.TrackLanguage(true, subtitle) : "No tracks detected", false);
+                }
+                else if (action == PlaybackOsd::Rewind || action == PlaybackOsd::FastForward)
+                    requestedPosition = playbackSeconds + (action == PlaybackOsd::Rewind ? -10 : 10);
+                else if (action == PlaybackOsd::PreviousChapter || action == PlaybackOsd::NextChapter)
+                {
+                    if (!frame.ChapterTarget(playbackSeconds, action == PlaybackOsd::NextChapter, requestedPosition))
+                        requestedPosition = -1;
+                }
+                else if (action == PlaybackOsd::RepeatAB)
+                {
+                    if (repeatB >= 0) repeatA = repeatB = -1;
+                    else if (repeatA < 0) repeatA = playbackSeconds;
+                    else if (playbackSeconds >= repeatA + 0.25)
+                    {
+                        repeatB = playbackSeconds;
+                        requestedPosition = repeatA;
+                    }
+                }
+                if (action == PlaybackOsd::Rewind && requestedPosition < 0) requestedPosition = 0;
+            }
+            if (!seeking && !switchingAudio && !paused && repeatB >= 0 && playbackSeconds >= repeatB && requestedPosition < 0)
+                requestedPosition = repeatA;
+            if (!seeking && !switchingAudio && requestedPosition >= 0)
+            {
+                if (playbackDuration > 0.25 && requestedPosition > playbackDuration - 0.25)
+                    requestedPosition = playbackDuration - 0.25;
+                seekTarget = requestedPosition;
+                seeking = frame.RequestSeek(seekTarget);
+                if (!seeking) repeatA = repeatB = -1;
             }
             const unsigned queueBefore = capture ? frame.QueueDepth() : 0;
             const unsigned frameBefore = frame.FramesReady();
             HRESULT advanceStatus = S_OK;
-            if (showFrame && compressed && playbackClockStarted && !paused)
+            if (!seeking && !switchingAudio && showFrame && compressed && playbackClockStarted &&
+                (!paused || frame.DiscTransitionPending()))
             {
                 const unsigned before = frame.FramesReady();
                 bool drained = false;
                 const double fallback = resumed ? 0.0 : elapsed;
-                const double videoElapsed = embeddedAudio ? frame.AdvanceEmbeddedAudio(fallback)
+                const double videoElapsed = paused ? 0 : embeddedAudio ? frame.AdvanceEmbeddedAudio(fallback)
                     : audioMaster ? audio.Advance(drained) : fallback;
-                playbackSeconds += videoElapsed;
-                const HRESULT status = frame.Advance(device, videoElapsed, embeddedAudio || audioMaster);
+                if (!frame.DiscMenuState().stillSeconds) playbackSeconds += videoElapsed;
+                const HRESULT status = frame.Advance(device, videoElapsed, embeddedAudio || audioMaster,
+                                                     paused ? 0 : elapsed);
+                if (discSegment != frame.DiscSegment())
+                {
+                    discSegment = frame.DiscSegment();
+                    playbackSeconds = 0;
+                    playbackDuration = frame.DurationSeconds();
+                    subtitleCount = frame.SubtitleCount();
+                    subtitle = 0;
+                    repeatA = repeatB = -1;
+                    double audioMs;
+                    unsigned audioBuffers;
+                    embeddedAudio = frame.EmbeddedAudioState(audioMs, audioBuffers);
+                    if (embeddedAudio && muted) frame.SetEmbeddedAudioMuted(true);
+                    const HRESULT segmentAudioStart = embeddedAudio && !paused ? frame.StartEmbeddedAudio() : S_FALSE;
+                    char segment[160];
+                    sprintf_s(segment, sizeof(segment),
+                        "DVD segment %u: audio=%u queued=%u subtitles=%u duration=%.3fs",
+                        discSegment, embeddedAudio ? 1u : 0u, embeddedAudio ? audioBuffers : 0u,
+                        subtitleCount, playbackDuration);
+                    playbackLog.Publish(segment, segmentAudioStart);
+                }
                 if (drained)
                 {
                     audioMaster = false;
@@ -759,16 +925,23 @@ namespace
                                                      present.BackBufferHeight, displayMode));
                     if (osdReady && capture && !playbackEnded)
                     {
-                        frame.DrawSubtitles(device, osd, present.BackBufferWidth,
-                                            present.BackBufferHeight, displayMode, subtitle, playbackSeconds);
-                        osd.Draw(device, present.BackBufferWidth, present.BackBufferHeight,
+                         if (!seeking) frame.DrawSubtitles(device, osd, present.BackBufferWidth,
+                                             present.BackBufferHeight, displayMode, subtitle, playbackSeconds);
+                         if (!seeking) frame.DrawDiscHighlight(device, osd, present.BackBufferWidth,
+                                             present.BackBufferHeight, displayMode);
+                        if (!osd.UsesStock()) osd.Draw(device, present.BackBufferWidth, present.BackBufferHeight,
                                  paused, displayMode, playbackSeconds, playbackDuration,
-                                 subtitle, subtitleCount);
+                                  subtitle, subtitleCount);
+                         osd.DrawTrackPopup(device, elapsed);
                     }
                 }
                 else
                     animation.Render();
                 device->EndScene();
+                if (osdReady && showFrame && capture && !playbackEnded)
+                    osd.DrawStock(paused, elapsed, playbackSeconds, playbackDuration,
+                                  frame.TrackLanguage(false), muted,
+                                  frame.TrackLanguage(true, subtitle), subtitle);
             }
             LARGE_INTEGER presentStart, presentEnd;
             QueryPerformanceCounter(&presentStart);
@@ -883,7 +1056,8 @@ namespace
                 if (pcmDrained)
                     BootLog("PCM drained; continuing on performance counter");
                 WritePacingTrace(traceCount, traceOmitted);
-                BootLog(FAILED(advanceStatus) ? "CPU MPEG-2 playback failed" :
+                BootLog(userStopped ? "Playback stopped by controller" :
+                        FAILED(advanceStatus) ? "CPU MPEG-2 playback failed" :
                         "CPU MPEG-2 clip finished", FAILED(advanceStatus) ? advanceStatus : S_OK);
                 char stats[160];
                 sprintf_s(stats, sizeof(stats), "Playback summary: recovery=%u video_packet_peak=%u",
@@ -917,6 +1091,7 @@ namespace
         }
 
         animation.Shutdown();
+        osd.CloseStock();
         device->Release();
         return 0;
     }

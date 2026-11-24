@@ -9,7 +9,8 @@ extern "C" {
 FfmpegAudio::FfmpegAudio()
     : m_engine(NULL), m_master(NULL), m_voice(NULL), m_codec(NULL),
       m_frame(NULL), m_resample(NULL), m_started(0), m_finished(0),
-      m_lastSamples(0), m_recoveryDebt(0), m_recoveryTicks(0), m_next(0)
+      m_lastSamples(0), m_recoveryDebt(0), m_voiceStall(0), m_voiceRestartAttempts(0),
+      m_allowPrimedStart(false), m_recoveryTicks(0), m_next(0)
 {
 }
 
@@ -67,9 +68,36 @@ void FfmpegAudio::Finish()
     InterlockedExchange(&m_finished, 1);
 }
 
+HRESULT FfmpegAudio::SetMuted(bool muted)
+{
+    return m_voice ? m_voice->SetVolume(muted ? 0.0f : 1.0f) : E_FAIL;
+}
+
+HRESULT FfmpegAudio::ResetForSeek()
+{
+    HRESULT hr = m_voice->Stop(0);
+    if (FAILED(hr)) return hr;
+    hr = m_voice->FlushSourceBuffers();
+    if (FAILED(hr)) return hr;
+    avcodec_flush_buffers(m_codec);
+    av_frame_unref(m_frame);
+    swr_free(&m_resample);
+    XAUDIO2_VOICE_STATE state;
+    m_voice->GetState(&state);
+    m_lastSamples = state.SamplesPlayed;
+    m_recoveryDebt = 0;
+    m_voiceStall = 0;
+    m_voiceRestartAttempts = 0;
+    InterlockedExchange(&m_finished, 0);
+    InterlockedExchange(&m_started, 0);
+    return S_OK;
+}
+
 HRESULT FfmpegAudio::SetPaused(bool paused)
 {
-    return paused ? m_voice->Stop(0) : m_voice->Start(0);
+    m_voiceStall = 0;
+    m_voiceRestartAttempts = 0;
+    return paused ? m_voice->Stop(0) : Start();
 }
 
 double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
@@ -79,6 +107,28 @@ double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
     const UINT64 samples = state.SamplesPlayed;
     const UINT64 delta = samples >= m_lastSamples ? samples - m_lastSamples : 0;
     m_lastSamples = samples;
+    if (delta)
+    {
+        m_voiceStall = 0;
+        m_voiceRestartAttempts = 0;
+    }
+    else if (!state.BuffersQueued)
+        m_voiceStall = 0;
+    else if (m_voiceRestartAttempts < 3)
+    {
+        // The render thread only advances this clock while unpaused. If
+        // queued PCM isn't moving, retry the same stop/start as pause/play.
+        // Don't flush the voice or advance video against a synthetic clock.
+        m_voiceStall += fallback < 0.05 ? fallback : 0.05;
+        if (m_voiceStall >= (m_voiceRestartAttempts ? 0.75 : 0.25))
+        {
+            ++m_voiceRestartAttempts;
+            m_voiceStall = 0;
+            ++m_recoveryTicks;
+            m_voice->Stop(0);
+            Start();
+        }
+    }
     if (!state.BuffersQueued)
     {
         if (!samples || (!delta && InterlockedCompareExchange(&m_finished, 0, 0)))
@@ -100,8 +150,6 @@ double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
 
 bool FfmpegAudio::IsPlaying() const
 {
-    if (!m_started)
-        return false;
     XAUDIO2_VOICE_STATE state;
     m_voice->GetState(&state);
     return state.BuffersQueued != 0;
@@ -150,8 +198,9 @@ HRESULT FfmpegAudio::Convert(const AVFrame* input, HANDLE stop)
         m_voice->GetState(&state);
         if (state.BuffersQueued < Slots)
             break;
-        // Startup waits for video to prime. Never wait on a stopped voice.
-        if (!InterlockedCompareExchange(&m_started, 0, 0))
+        // A DVD segment can notify the renderer before the voice fills,
+        // independent of how many video frames the segment contains.
+        if (!m_allowPrimedStart && !InterlockedCompareExchange(&m_started, 0, 0))
             return E_FAIL;
         if (WaitForSingleObject(stop, 2) != WAIT_TIMEOUT)
             return E_ABORT;
@@ -176,7 +225,9 @@ HRESULT FfmpegAudio::Convert(const AVFrame* input, HANDLE stop)
 
 HRESULT FfmpegAudio::Decode(const AVPacket* packet, HANDLE stop)
 {
-    if (avcodec_send_packet(m_codec, packet) < 0)
+    const int sent = avcodec_send_packet(m_codec, packet);
+    if (sent == AVERROR_INVALIDDATA && packet) return S_OK;
+    if (sent < 0)
         return E_FAIL;
     for (;;)
     {
@@ -189,6 +240,7 @@ HRESULT FfmpegAudio::Decode(const AVPacket* packet, HANDLE stop)
             do { hr = Convert(NULL, stop); } while (hr == S_OK);
             return hr == S_FALSE ? S_OK : hr;
         }
+        if (status == AVERROR_INVALIDDATA && packet) return S_OK;
         if (status < 0)
             return E_FAIL;
         const HRESULT hr = Convert(m_frame, stop);

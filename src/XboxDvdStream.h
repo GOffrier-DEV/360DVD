@@ -21,6 +21,7 @@ public:
     LONG LastStatus() const { return m_status; }
     // The stream must outlive the reader returned by DVDOpenStream.
     static dvd_reader_stream_cb* ReaderCallbacks();
+    static dvd_reader_stream_cb* ReaderAuthCallbacks();
     static dvdcss_stream_cb* CssCallbacks();
     static dvdcss_stream_cb* CssAuthCallbacks();
     int CssDeviceFd() const;
@@ -29,6 +30,8 @@ private:
     XboxDvdStream(const XboxDvdStream&);
     XboxDvdStream& operator=(const XboxDvdStream&);
     HANDLE m_device;
+    unsigned char* m_readStorage;
+    DWORD m_readLimit;
     unsigned long long m_position;
     LONG m_status;
 };

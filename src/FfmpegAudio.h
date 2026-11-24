@@ -17,7 +17,10 @@ public:
     HRESULT Open(const AVStream& stream);
     HRESULT Decode(const AVPacket* packet, HANDLE stop);
     HRESULT Start();
+    void AllowPrimedStart() { m_allowPrimedStart = true; }
     HRESULT SetPaused(bool paused);
+    HRESULT SetMuted(bool muted);
+    HRESULT ResetForSeek();
     void Finish();
     double Advance(double fallback, bool videoBackpressure);
     unsigned RecoveryTicks() const { return m_recoveryTicks; }
@@ -38,6 +41,9 @@ private:
     volatile LONG m_finished;
     UINT64 m_lastSamples;
     double m_recoveryDebt;
+    double m_voiceStall;
+    unsigned m_voiceRestartAttempts;
+    bool m_allowPrimedStart;
     unsigned m_recoveryTicks;
     unsigned m_next;
     SHORT m_pcm[Slots][SlotSamples * Channels];

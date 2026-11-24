@@ -81,6 +81,8 @@ struct DvdFrameProbe::QueuedFrame
     LONGLONG worstReadTicks;
     unsigned readCalls, readBytes;
     HRESULT status;
+    int64_t dvdPts;
+    double subtitleTime;
 };
 
 struct DvdFrameProbe::Decoder
@@ -100,14 +102,34 @@ struct DvdFrameProbe::Decoder
     float displayAspect;
     FfmpegAudio* audio;
     int audioStream;
+    const char* audioLanguage;
     enum { SubtitleTracks = 32, SubtitleCues = 24 };
-    struct Cue { AVSubtitle bitmap; double start, end; unsigned track; };
+    struct Cue { AVSubtitle bitmap; double start, end; unsigned track, streamId; };
     AVCodecContext* subtitleCodec[SubtitleTracks];
     int subtitleStream[SubtitleTracks];
+    const char* subtitleLanguage[SubtitleTracks];
     unsigned subtitleCount, cueCount;
     Cue cues[SubtitleCues];
+    Cue heldMenuCue;
     bool audioFailed;
     bool videoEnded;
+    bool stillPresented, stillContinueQueued;
+    double stillElapsed;
+    int64_t presentedDvdPts;
+    double presentedSubtitleTime;
+    bool discResumeRequest, discResuming;
+    bool emptyDiscBoundary;
+    bool discAudioHandoffArmed, discAudioHandedOff;
+    bool needsFirstDiscPicture;
+    struct DeferredAudio { AVPacket packet; DeferredAudio* next; };
+    DeferredAudio *deferredHead, *deferredTail;
+    unsigned deferredBytes, deferredCount;
+    bool deferStartupAudio;
+    void DrainDeferredAudio(bool play);
+    void DecodeAudioPacket(AVPacket* packet);
+    bool audioSwitchPending;
+    int audioSwitchRequest;
+    HRESULT audioSwitchStatus;
     bool flushed;
     int demuxEnd;
     enum { PacketCapacity = 96, PacketByteBudget = 4 * 1024 * 1024 };
@@ -115,13 +137,95 @@ struct DvdFrameProbe::Decoder
     unsigned packetHead, packetCount, packetBytes, packetHighWater;
     unsigned packetBudget, startupVideoBytes, primedVideoBytes;
     void PumpPacket();
+    bool AddSubtitleStream(unsigned index);
+    const char* ProbeTrackLanguage(bool subtitle, int index) const;
     HANDLE thread, stop, freeSlots, ready, primed;
+    HANDLE seekRequest, seekComplete;
+    double seekTarget, seekGate;
+    HRESULT seekStatus;
+    bool seekingAudio, seekingVideo;
+    unsigned chapterCount;
+    double chapters[128];
     unsigned writeIndex, readIndex, calls;
     LONGLONG parseTicks, inputWaitTicks;
     LONGLONG audioWorkTicks;
     enum { QueueCapacity = 6 };
     QueuedFrame queue[QueueCapacity];
 };
+
+void DvdFrameProbe::Decoder::DecodeAudioPacket(AVPacket* packet)
+{
+    if (!audio || audioFailed) return;
+    audioFailed = FAILED(audio->Decode(packet, stop));
+    if (audioFailed && file == INVALID_HANDLE_VALUE)
+        LogDvdNavStartup("DVD audio decode or PCM submission failed");
+    if (discAudioHandoffArmed && !audioFailed && audio->QueuedBuffers() >= 24)
+    {
+        discAudioHandoffArmed = false;
+        discAudioHandedOff = true;
+        SetEvent(seekComplete);
+    }
+}
+
+void DvdFrameProbe::Decoder::DrainDeferredAudio(bool play)
+{
+    while (deferredHead)
+    {
+        DeferredAudio* item = deferredHead;
+        deferredHead = item->next;
+        if (play && WaitForSingleObject(seekRequest, 0) == WAIT_TIMEOUT)
+            DecodeAudioPacket(&item->packet);
+        av_packet_unref(&item->packet);
+        delete item;
+    }
+    deferredTail = NULL;
+    deferredBytes = deferredCount = 0;
+}
+
+bool DvdFrameProbe::Decoder::AddSubtitleStream(unsigned index)
+{
+    if (subtitleCount == SubtitleTracks) return false;
+    const AVCodecParameters* par = format->streams[index]->codecpar;
+    if (par->codec_id != AV_CODEC_ID_DVD_SUBTITLE) return false;
+    for (unsigned i = 0; i < subtitleCount; ++i)
+        if (subtitleStream[i] == static_cast<int>(index)) return false;
+    const AVCodec* sub = avcodec_find_decoder(AV_CODEC_ID_DVD_SUBTITLE);
+    AVCodecContext* context = sub ? avcodec_alloc_context3(sub) : NULL;
+    if (!context) return false;
+    AVDictionary* options = NULL;
+    uint32_t clut[16];
+    if (file == INVALID_HANDLE_VALUE && FfmpegDiscSubtitlePalette(io, clut))
+    {
+        char palette[16 * 8 + 1];
+        for (unsigned i = 0; i < 16; ++i)
+        {
+            const int y = int((clut[i] >> 16) & 255) - 16;
+            const int cr = int((clut[i] >> 8) & 255) - 128;
+            const int cb = int(clut[i] & 255) - 128;
+            const unsigned r = av_clip_uint8((298 * y + 409 * cr + 128) >> 8);
+            const unsigned g = av_clip_uint8((298 * y - 100 * cb - 208 * cr + 128) >> 8);
+            const unsigned b = av_clip_uint8((298 * y + 516 * cb + 128) >> 8);
+            sprintf_s(palette + i * 8, sizeof(palette) - i * 8, "%06x%s",
+                      (r << 16) | (g << 8) | b, i == 15 ? "" : ", ");
+        }
+        av_dict_set(&options, "palette", palette, 0);
+    }
+    int opened = avcodec_parameters_to_context(context, par);
+    if (opened >= 0) opened = avcodec_open2(context, sub, &options);
+    av_dict_free(&options);
+    if (opened < 0)
+    {
+        avcodec_free_context(&context);
+        return false;
+    }
+    const char* language = ProbeTrackLanguage(true, index);
+    EnterCriticalSection(&queueStats);
+    subtitleStream[subtitleCount] = index;
+    subtitleLanguage[subtitleCount] = language;
+    subtitleCodec[subtitleCount++] = context;
+    LeaveCriticalSection(&queueStats);
+    return true;
+}
 
 void DvdFrameProbe::Decoder::PumpPacket()
 {
@@ -145,6 +249,15 @@ void DvdFrameProbe::Decoder::PumpPacket()
         return;
     }
     if (result == 0)
+    {
+        // MPEG-PS can expose a subtitle stream only when its first packet arrives.
+        if (AddSubtitleStream(packet->stream_index) && file == INVALID_HANDLE_VALUE)
+        {
+            char message[128];
+            sprintf_s(message, sizeof(message), "Late subtitle %u: stream=%d language=%s",
+                subtitleCount, packet->stream_index, subtitleLanguage[subtitleCount - 1]);
+            LogDvdNavStartup(message);
+        }
         for (unsigned i = 0; i < subtitleCount; ++i)
         {
             if (packet->stream_index != subtitleStream[i]) continue;
@@ -162,6 +275,7 @@ void DvdFrameProbe::Decoder::PumpPacket()
                     Cue& cue = cues[cueCount++];
                     cue.bitmap = subtitle;
                     cue.track = i + 1;
+                    cue.streamId = format->streams[packet->stream_index]->id;
                     cue.start = pts - origin + subtitle.start_display_time / 1000.0;
                     cue.end = pts - origin + subtitle.end_display_time / 1000.0;
                     if (cue.end <= cue.start) cue.end = cue.start + 5;
@@ -172,21 +286,52 @@ void DvdFrameProbe::Decoder::PumpPacket()
             avsubtitle_free(&subtitle);
             break;
         }
+    }
     if (audio && !audioFailed &&
         (result == AVERROR_EOF || (result == 0 && packet->stream_index == audioStream)))
     {
         QueryPerformanceCounter(&start);
-        audioFailed = FAILED(audio->Decode(result == AVERROR_EOF ? NULL : packet, stop));
+        const int64_t origin = format->start_time == AV_NOPTS_VALUE ? 0 : format->start_time;
+        if (seekingAudio && result == 0 && packet->pts != AV_NOPTS_VALUE)
+            seekingAudio = packet->pts * av_q2d(format->streams[audioStream]->time_base) -
+                           origin / double(AV_TIME_BASE) < seekGate;
+        else
+            seekingAudio = false;
+        if (!seekingAudio)
+        {
+            // A menu can have a lone MPEG reference picture that isn't
+            // output until decoder flush. Don't let intervening audio
+            // block demux before that picture becomes available.
+            DeferredAudio* item = NULL;
+            if (deferStartupAudio && result == 0 && deferredCount < 4096 &&
+                static_cast<unsigned>(packet->size) <= 4 * 1024 * 1024 - deferredBytes)
+                item = new DeferredAudio();
+            if (item)
+            {
+                deferredBytes += packet->size;
+                ++deferredCount;
+                av_packet_move_ref(&item->packet, packet);
+                if (deferredTail) deferredTail->next = item;
+                else deferredHead = item;
+                deferredTail = item;
+            }
+            else if (!deferStartupAudio || result == 0)
+            {
+                deferStartupAudio = false;
+                DrainDeferredAudio(true);
+                DecodeAudioPacket(result == AVERROR_EOF ? NULL : packet);
+            }
+        }
         QueryPerformanceCounter(&end);
         audioWorkTicks += end.QuadPart - start.QuadPart;
     }
-    if (audio && (demuxEnd || audioFailed))
+    if (audio && (audioFailed || (demuxEnd && !deferStartupAudio)))
         audio->Finish();
     av_packet_unref(packet);
 }
 
 DvdFrameProbe::DvdFrameProbe()
-    : m_decoder(NULL), m_width(0), m_height(0), m_untilNext(0),
+    : m_decoder(NULL), m_width(0), m_height(0), m_discSegment(0), m_untilNext(0),
       m_framesReady(0), m_lateByFrame(0), m_audioSyncDrops(0), m_videoPacketHighWater(0),
       m_audioWorkTicks(0), m_maxLate(0),
       m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
@@ -232,11 +377,15 @@ void DvdFrameProbe::CloseDecoder()
     }
     if (d.ready) CloseHandle(d.ready);
     if (d.primed) CloseHandle(d.primed);
+    if (d.seekRequest) CloseHandle(d.seekRequest);
+    if (d.seekComplete) CloseHandle(d.seekComplete);
     if (d.freeSlots) CloseHandle(d.freeSlots);
     if (d.stop) CloseHandle(d.stop);
     delete d.audio;
+    d.DrainDeferredAudio(false);
     for (unsigned i = 0; i < d.cueCount; ++i)
         avsubtitle_free(&d.cues[i].bitmap);
+    avsubtitle_free(&d.heldMenuCue.bitmap);
     for (unsigned i = 0; i < d.subtitleCount; ++i)
         avcodec_free_context(&d.subtitleCodec[i]);
     for (unsigned i = 0; i < Decoder::PacketCapacity; ++i)
@@ -248,7 +397,7 @@ void DvdFrameProbe::CloseDecoder()
     DestroyFfmpegFileIo(&d.io);
     DeleteCriticalSection(&d.queueStats);
 
-    CloseHandle(d.file);
+    if (d.file != INVALID_HANDLE_VALUE) CloseHandle(d.file);
     delete m_decoder;
     m_decoder = NULL;
 }
@@ -259,15 +408,121 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
     if (PlaybackAffinity::Enabled())
         PlaybackAffinity::Pin(PlaybackAffinity::Decoder);
     Decoder& d = *player.m_decoder;
-    HANDLE wait[] = {d.stop, d.freeSlots};
+    HANDLE wait[] = {d.stop, d.seekRequest, d.freeSlots};
     unsigned initialFrames = 0;
     bool primed = false;
     bool refillAudio = false;
     bool urgentAudio = false;
+    bool seeking = false;
+    bool ended = false;
     const unsigned audioLow = 8, audioTarget = 16, videoPacketTarget = 12;
     const unsigned audioCritical = 3, audioResumeVideo = 6;
     for (;;)
     {
+        if (WaitForSingleObject(d.stop, 0) == WAIT_OBJECT_0) break;
+        if (seeking && d.discAudioHandedOff)
+            seeking = false;
+        if (WaitForSingleObject(d.seekRequest, 0) == WAIT_OBJECT_0)
+        {
+            ResetEvent(d.seekRequest);
+            if (d.audioSwitchRequest)
+            {
+                d.audioSwitchRequest = 0;
+                d.audioSwitchStatus = S_FALSE;
+                const unsigned count = d.format->nb_streams;
+                const unsigned current = static_cast<unsigned>(d.audioStream);
+                for (unsigned step = 1; !ended && step < count; ++step)
+                {
+                    const unsigned index = (current + step) % count;
+                    AVStream& stream = *d.format->streams[index];
+                    if (stream.codecpar->codec_type != AVMEDIA_TYPE_AUDIO ||
+                        !avcodec_find_decoder(stream.codecpar->codec_id)) continue;
+                    FfmpegAudio* replacement = new FfmpegAudio();
+                    if (!replacement) continue;
+                    if (FAILED(replacement->Open(stream)))
+                    {
+                        delete replacement;
+                        continue;
+                    }
+                    delete d.audio;
+                    d.audio = replacement;
+                    d.audioStream = index;
+                    d.audioLanguage = d.ProbeTrackLanguage(false, index);
+                    d.audioFailed = d.seekingAudio = false;
+                    d.audioSwitchStatus = S_OK;
+                    break;
+                }
+                SetEvent(d.seekComplete);
+                continue;
+            }
+            const int64_t origin = !d.format || d.format->start_time == AV_NOPTS_VALUE
+                ? 0 : d.format->start_time;
+            const int64_t timestamp = origin + static_cast<int64_t>(d.seekTarget * AV_TIME_BASE);
+            const bool discResume = d.discResumeRequest;
+            if (discResume ? !ResumeFfmpegDiscWait(d.io, true) :
+                av_seek_frame(d.format, -1, timestamp, AVSEEK_FLAG_BACKWARD) < 0)
+            {
+                d.seekStatus = E_FAIL;
+                SetEvent(d.seekComplete);
+                continue;
+            }
+            if (!discResume)
+            {
+                if (d.audio && FAILED(d.audio->ResetForSeek())) d.audioFailed = true;
+                avcodec_flush_buffers(d.codec);
+                av_frame_unref(d.decoded);
+                av_packet_unref(d.packet);
+            }
+            // Disc resumes free the old objects below. A NAV-only still
+            // may never have allocated a frame, packet, or codec at all.
+            for (unsigned i = 0; i < Decoder::PacketCapacity; ++i)
+                av_packet_unref(&d.pendingVideo[i]);
+            EnterCriticalSection(&d.queueStats);
+            for (unsigned i = 0; i < d.cueCount; ++i) avsubtitle_free(&d.cues[i].bitmap);
+            d.cueCount = d.queuedFrames = 0;
+            LeaveCriticalSection(&d.queueStats);
+            for (unsigned i = 0; i < d.subtitleCount; ++i)
+            {
+                if (discResume) avcodec_free_context(&d.subtitleCodec[i]);
+                else avcodec_flush_buffers(d.subtitleCodec[i]);
+            }
+            if (discResume)
+            {
+                delete d.audio;
+                d.audio = NULL;
+                d.audioFailed = false;
+                d.subtitleCount = 0;
+                av_packet_free(&d.packet);
+                av_frame_free(&d.decoded);
+                avcodec_free_context(&d.codec);
+                avformat_close_input(&d.format);
+            }
+            while (WaitForSingleObject(d.ready, 0) == WAIT_OBJECT_0) {}
+            while (WaitForSingleObject(d.freeSlots, 0) == WAIT_OBJECT_0) {}
+            ReleaseSemaphore(d.freeSlots, Decoder::QueueCapacity, NULL);
+            d.readIndex = d.writeIndex = d.packetHead = d.packetCount = d.packetBytes = 0;
+            d.demuxEnd = 0;
+            d.emptyDiscBoundary = false;
+            d.DrainDeferredAudio(false);
+            d.deferStartupAudio = discResume;
+            d.discAudioHandoffArmed = discResume;
+            d.discAudioHandedOff = false;
+            d.flushed = false;
+            if (!discResume) d.videoEnded = false;
+            d.seekGate = d.seekTarget;
+            d.seekingAudio = d.seekingVideo = !discResume;
+            d.seekStatus = S_OK;
+            initialFrames = 0;
+            primed = refillAudio = urgentAudio = ended = false;
+            seeking = true;
+        }
+        if (ended)
+        {
+            WaitForMultipleObjects(2, wait, FALSE, INFINITE);
+            continue;
+        }
+        if (!d.deferStartupAudio && d.deferredHead)
+            d.DrainDeferredAudio(true);
         const bool haveAudio = d.audio && !d.audioFailed;
         const unsigned audioBuffers = haveAudio ? d.audio->QueuedBuffers() : 0;
         const bool canReadAhead = d.format && !d.demuxEnd &&
@@ -280,6 +535,12 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
             d.primedVideoBytes = d.packetBytes;
             SetEvent(d.primed);
             primed = true;
+            if (seeking)
+            {
+                seeking = false;
+                d.discAudioHandoffArmed = false;
+                SetEvent(d.seekComplete);
+            }
         }
         // Normally keep decoded video ahead. If audio is at risk of
         // starving, demux for it even with a shallow decoded-video queue.
@@ -301,7 +562,7 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
             d.PumpPacket();
             continue;
         }
-        const DWORD available = WaitForMultipleObjects(2, wait, FALSE,
+        const DWORD available = WaitForMultipleObjects(3, wait, FALSE,
             readAhead ? 0 : canReadAhead && haveAudio ? 10 : INFINITE);
         if (available == WAIT_TIMEOUT)
         {
@@ -309,7 +570,8 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
                 d.PumpPacket();
             continue;
         }
-        if (available != WAIT_OBJECT_0 + 1)
+        if (available == WAIT_OBJECT_0 + 1) continue;
+        if (available != WAIT_OBJECT_0 + 2)
             break;
         QueuedFrame& frame = d.queue[d.writeIndex];
         LARGE_INTEGER start, finish;
@@ -317,6 +579,9 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
         const bool haveCpuStart = DecodeCpuTime(cpuStart);
         QueryPerformanceCounter(&start);
         const HRESULT status = player.NextFrame(frame);
+        if (status == S_FALSE && seeking && d.discResumeRequest && !initialFrames &&
+            FfmpegDiscBoundaryPending(d.io))
+            d.emptyDiscBoundary = true;
         QueryPerformanceCounter(&finish);
         frame.decodeCpuMs = haveCpuStart && DecodeCpuTime(cpuFinish) && cpuFinish >= cpuStart
             ? (cpuFinish - cpuStart) / 10000.0 : -1.0;
@@ -351,7 +616,17 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
         {
             if (d.audio)
                 d.audio->Finish();
-            break;
+            ended = true;
+            if (seeking)
+            {
+                seeking = false;
+                d.discAudioHandoffArmed = false;
+                if (!d.discAudioHandedOff)
+                {
+                    d.seekStatus = initialFrames > 1 || d.emptyDiscBoundary ? S_OK : E_FAIL;
+                    SetEvent(d.seekComplete);
+                }
+            }
         }
     }
     return 0;
@@ -393,13 +668,23 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
         const unsigned chroma = ((frame.width + 1) / 2) * ((frame.height + 1) / 2);
         const BYTE* planes[] = {frame.pixels, frame.pixels + luma, frame.pixels + luma + chroma};
         const double late = -m_untilNext;
-        const bool drop = audioMaster && late >= frame.duration;
+        const bool firstDiscPicture = d.needsFirstDiscPicture;
+        const bool drop = !firstDiscPicture && audioMaster && late >= frame.duration;
         if (!drop)
             hr = LoadPlanes(device, frame.width, frame.height, planes, frame.width);
         if (SUCCEEDED(hr))
         {
             if (!drop)
+            {
+                if (firstDiscPicture)
+                {
+                    d.needsFirstDiscPicture = false;
+                    m_untilNext = 0;
+                }
+                d.presentedDvdPts = frame.dvdPts;
+                d.presentedSubtitleTime = frame.subtitleTime;
                 ++m_framesReady;
+            }
             else
                 ++m_audioSyncDrops;
             if (late > m_maxLate) m_maxLate = late;
@@ -437,11 +722,11 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
     LARGE_INTEGER frequency;
     if (QueryPerformanceFrequency(&frequency))
         m_parseFrequency = frequency.QuadPart;
-    // Takes ownership of the input file, even when startup fails.
+    // Takes ownership of the file. INVALID_HANDLE_VALUE selects the optical drive.
     m_decoder = new Decoder();
     if (!m_decoder)
     {
-        CloseHandle(file);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
         return E_OUTOFMEMORY;
     }
     m_decoder->file = file;
@@ -451,7 +736,10 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
     m_decoder->freeSlots = CreateSemaphore(NULL, capacity, capacity, NULL);
     m_decoder->ready = CreateSemaphore(NULL, 0, capacity, NULL);
     m_decoder->primed = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready && m_decoder->primed)
+    m_decoder->seekRequest = CreateEvent(NULL, TRUE, FALSE, NULL);
+    m_decoder->seekComplete = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready && m_decoder->primed &&
+        m_decoder->seekRequest && m_decoder->seekComplete)
         m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
     HRESULT hr = E_FAIL;
     if (m_decoder->thread)
@@ -465,39 +753,99 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
     return hr == S_FALSE ? E_FAIL : hr;
 }
 
-HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed, bool audioMaster)
+HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed, bool audioMaster, double wallElapsed)
 {
     if (!m_decoder)
         return S_OK;
-    if (m_decoder->videoEnded)
+    Decoder& d = *m_decoder;
+    if (!d.discResuming && FfmpegDiscUserJumpPending(d.io))
     {
-        if (m_decoder->audio && m_decoder->audio->IsPlaying())
-            return S_OK;
-        CloseDecoder();
-        return S_FALSE;
-    }
-    m_untilNext -= elapsed;
-    if (m_untilNext > 0)
+        // An explicit VM jump replaces the old menu. Unlike an authored
+        // WAIT, it must not play the remaining menu audio before switching.
+        ResetEvent(d.seekComplete);
+        d.discResuming = d.discResumeRequest = true;
+        SetEvent(d.seekRequest);
         return S_OK;
-    HRESULT hr;
-    unsigned remaining = Decoder::QueueCapacity;
-    do
+    }
+    if (d.discResuming)
     {
-        hr = Consume(device, 0, audioMaster);
-    } while (audioMaster && hr == S_OK && m_untilNext <= 0 && --remaining);
+        if (WaitForSingleObject(d.seekComplete, 0) != WAIT_OBJECT_0) return S_OK;
+        d.discResuming = d.discResumeRequest = false;
+        if (FAILED(d.seekStatus))
+        {
+            const HRESULT status = d.seekStatus;
+            CloseDecoder();
+            return status;
+        }
+        d.videoEnded = false;
+        d.stillPresented = d.stillContinueQueued = false;
+        d.stillElapsed = 0;
+        if (!d.emptyDiscBoundary)
+        {
+            avsubtitle_free(&d.heldMenuCue.bitmap);
+            d.needsFirstDiscPicture = true;
+            ++m_discSegment;
+        }
+        m_untilNext = 0;
+        elapsed = 0;
+    }
+    HRESULT hr = S_FALSE;
+    if (!d.videoEnded)
+    {
+        m_untilNext -= elapsed;
+        if (m_untilNext > 0) return S_OK;
+        unsigned remaining = Decoder::QueueCapacity;
+        do
+        {
+            hr = Consume(device, 0, audioMaster);
+        } while (audioMaster && hr == S_OK && m_untilNext <= 0 && --remaining);
+    }
     if (hr == E_PENDING)
     {
         ++m_underruns;
         return S_OK; // Hold the previous frame and retry at the next refresh.
     }
-    if (hr == S_FALSE && m_decoder->audio && m_decoder->audio->IsPlaying())
+    if (hr == S_FALSE)
     {
-        m_decoder->videoEnded = true;
-        return S_OK;
+        d.videoEnded = true;
+        if (d.audio && d.audio->IsPlaying()) return S_OK;
+        if (ResumeFfmpegDiscWait(d.io, false))
+        {
+            ResetEvent(d.seekComplete);
+            d.discResuming = d.discResumeRequest = true;
+            SetEvent(d.seekRequest);
+            return S_OK;
+        }
+        if (FfmpegDiscBoundaryPending(d.io) && !FfmpegDiscMenuState(d.io).stillSeconds)
+            return S_OK; // A queued menu command takes precedence over acknowledging WAIT.
+        const DvdMenuState menu = FfmpegDiscMenuState(d.io);
+        if (menu.stillSeconds || d.stillPresented)
+        {
+            if (d.stillPresented) d.stillElapsed += wallElapsed;
+            d.stillPresented = true;
+            if (menu.stillSeconds && menu.stillSeconds < 255 &&
+                d.stillElapsed >= menu.stillSeconds && !d.stillContinueQueued)
+                d.stillContinueQueued = QueueFfmpegDiscMenu(d.io, DvdMenuContinue);
+            return S_OK;
+        }
     }
     if (hr != S_OK)
         CloseDecoder();
     return hr;
+}
+
+void DvdFrameProbe::Stop()
+{
+    if (m_decoder)
+    {
+        SetEmbeddedAudioPaused(true);
+        CloseDecoder();
+    }
+}
+
+unsigned DvdFrameProbe::ChapterCount() const
+{
+    return m_decoder ? m_decoder->chapterCount : 0;
 }
 
 double DvdFrameProbe::ParseMilliseconds() const
@@ -540,19 +888,36 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
     Decoder& d = *m_decoder;
     if (!d.codec)
     {
-        d.io = CreateFfmpegFileIo(d.file, &d.ioStats);
+        HRESULT inputStatus = E_FAIL;
+        if (!d.io)
+            d.io = d.file == INVALID_HANDLE_VALUE ? CreateFfmpegDiscIo(&d.ioStats, inputStatus)
+                                                 : CreateFfmpegFileIo(d.file, &d.ioStats);
+        if (!d.io) return inputStatus;
         d.format = d.io ? avformat_alloc_context() : NULL;
         if (!d.format)
             return E_OUTOFMEMORY;
         d.format->pb = d.io;
         d.format->flags |= AVFMT_FLAG_CUSTOM_IO;
-        if (avformat_open_input(&d.format, NULL, NULL, NULL) < 0 ||
-            avformat_find_stream_info(d.format, NULL) < 0)
-            return E_FAIL;
+        const bool optical = d.file == INVALID_HANDLE_VALUE;
+        if (optical) LogDvdNavStartup("Opening FFmpeg MPEG program stream");
+        const AVInputFormat* inputFormat = optical ? av_find_input_format("mpeg") : NULL;
+        const int opened = avformat_open_input(&d.format, NULL, inputFormat, NULL);
+        if (opened >= 0 && optical) LogDvdNavStartup("Probing FFmpeg streams");
+        const int probed = opened < 0 ? opened : avformat_find_stream_info(d.format, NULL);
         const AVCodec* codec = NULL;
-        d.video = av_find_best_stream(d.format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+        d.video = probed < 0 ? -1 :
+            av_find_best_stream(d.format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
         if (d.video < 0 || !codec || codec->id != AV_CODEC_ID_MPEG2VIDEO)
-            return E_INVALIDARG;
+        {
+            if (d.discResumeRequest && FfmpegDiscBoundaryPending(d.io))
+            {
+                d.emptyDiscBoundary = true;
+                LogDvdNavStartup("DVD boundary without new video; retaining last frame");
+                return S_FALSE;
+            }
+            return probed < 0 ? E_FAIL : E_INVALIDARG;
+        }
+        if (optical) LogDvdNavStartup("FFmpeg stream probe complete");
         d.codec = avcodec_alloc_context3(codec);
         d.decoded = av_frame_alloc();
         d.packet = av_packet_alloc();
@@ -560,6 +925,20 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
             return E_OUTOFMEMORY;
         AVStream* video = d.format->streams[d.video];
         d.duration = d.format->duration > 0 ? d.format->duration / double(AV_TIME_BASE) : 0;
+        if (optical)
+        {
+            const double duration = FfmpegDiscDuration(d.io);
+            if (duration > 0) d.duration = duration;
+        }
+        const double chapterOrigin = d.format->start_time == AV_NOPTS_VALUE ?
+            0 : d.format->start_time / double(AV_TIME_BASE);
+        for (unsigned i = 0; d.file != INVALID_HANDLE_VALUE && i < d.format->nb_chapters &&
+                             d.chapterCount < ARRAYSIZE(d.chapters); ++i)
+        {
+            const AVChapter& chapter = *d.format->chapters[i];
+            const double start = chapter.start * av_q2d(chapter.time_base) - chapterOrigin;
+            d.chapters[d.chapterCount++] = start > 0 ? start : 0;
+        }
         const AVRational sar = av_guess_sample_aspect_ratio(d.format, video, NULL);
         if (sar.num > 0 && sar.den > 0 && video->codecpar->width > 0 && video->codecpar->height > 0)
             d.displayAspect = static_cast<float>(av_q2d(sar) * video->codecpar->width /
@@ -605,6 +984,24 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         const AVCodec* audioCodec = NULL;
         d.audioStream = av_find_best_stream(d.format, AVMEDIA_TYPE_AUDIO,
                                             -1, d.video, &audioCodec, 0);
+        if (optical)
+        {
+            const int physical = FfmpegDiscAudioStream(d.io);
+            for (unsigned i = 0; physical >= 0 && i < d.format->nb_streams; ++i)
+            {
+                const AVStream& stream = *d.format->streams[i];
+                const unsigned id = stream.id;
+                if (stream.codecpar->codec_type != AVMEDIA_TYPE_AUDIO ||
+                    !((id >= 0x80 && id <= 0x8f) || (id >= 0xa0 && id <= 0xa7) ||
+                      (id >= 0x1c0 && id <= 0x1c7)) ||
+                    (id & 7) != static_cast<unsigned>(physical)) continue;
+                const AVCodec* decoder = avcodec_find_decoder(stream.codecpar->codec_id);
+                if (!decoder) continue;
+                d.audioStream = i;
+                audioCodec = decoder;
+                break;
+            }
+        }
         FILE* trackFile = fopen("game:\\audio-track.txt", "r");
         if (trackFile)
         {
@@ -624,21 +1021,9 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
                 }
             }
         }
-        const AVCodec* sub = avcodec_find_decoder(AV_CODEC_ID_DVD_SUBTITLE);
-        for (unsigned i = 0; sub && i < d.format->nb_streams && d.subtitleCount < Decoder::SubtitleTracks; ++i)
-        {
-            const AVCodecParameters* par = d.format->streams[i]->codecpar;
-            if (par->codec_id != AV_CODEC_ID_DVD_SUBTITLE) continue;
-            AVCodecContext* context = avcodec_alloc_context3(sub);
-            if (!context) continue;
-            if (avcodec_parameters_to_context(context, par) < 0 || avcodec_open2(context, sub, NULL) < 0)
-                avcodec_free_context(&context);
-            else
-            {
-                d.subtitleStream[d.subtitleCount] = i;
-                d.subtitleCodec[d.subtitleCount++] = context;
-            }
-        }
+        for (unsigned i = 0; i < d.format->nb_streams && d.subtitleCount < Decoder::SubtitleTracks; ++i)
+            d.AddSubtitleStream(i);
+        d.audioLanguage = d.ProbeTrackLanguage(false, d.audioStream);
         if (d.audioStream >= 0 && audioCodec)
         {
             d.audio = new FfmpegAudio();
@@ -647,6 +1032,24 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
                 delete d.audio;
                 d.audio = NULL;
             }
+            else if (d.audio && d.discAudioHandoffArmed)
+                d.audio->AllowPrimedStart();
+        }
+        if (optical)
+        {
+            char message[192];
+            sprintf_s(message, sizeof(message),
+                "Track probe: audio_stream=%d decoder=%s opened=%u language=%s subtitle_tracks=%u",
+                d.audioStream, audioCodec ? audioCodec->name : "none", d.audio ? 1u : 0u,
+                d.audioLanguage ? d.audioLanguage : "unavailable", d.subtitleCount);
+            LogDvdNavStartup(message);
+            for (unsigned i = 0; i < d.subtitleCount; ++i)
+            {
+                sprintf_s(message, sizeof(message), "Subtitle %u: stream=%d language=%s",
+                    i + 1, d.subtitleStream[i],
+                    d.subtitleLanguage[i] ? d.subtitleLanguage[i] : "unavailable");
+                LogDvdNavStartup(message);
+            }
         }
     }
 
@@ -654,6 +1057,9 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
     {
         if (WaitForSingleObject(d.stop, 0) == WAIT_OBJECT_0)
             return E_ABORT;
+        if (WaitForSingleObject(d.seekRequest, 0) == WAIT_OBJECT_0 &&
+            FfmpegDiscUserJumpPending(d.io))
+            return S_FALSE;
         LARGE_INTEGER start, end;
         QueryPerformanceCounter(&start);
         const int status = avcodec_receive_frame(d.codec, d.decoded);
@@ -661,9 +1067,29 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         d.parseTicks += end.QuadPart - start.QuadPart;
         ++d.calls;
         if (status == AVERROR_EOF)
+        {
+            if (d.deferStartupAudio || d.deferredHead)
+            {
+                d.deferStartupAudio = false;
+                d.DrainDeferredAudio(true);
+                d.DecodeAudioPacket(NULL);
+            }
             return S_FALSE;
+        }
         if (status == 0)
+        {
+            const int64_t pts = d.decoded->best_effort_timestamp;
+            const int64_t origin = d.format->start_time == AV_NOPTS_VALUE ? 0 : d.format->start_time;
+            if (d.seekingVideo && pts != AV_NOPTS_VALUE &&
+                pts * av_q2d(d.format->streams[d.video]->time_base) - origin / double(AV_TIME_BASE) < d.seekGate)
+            {
+                av_frame_unref(d.decoded);
+                continue;
+            }
+            d.seekingVideo = false;
+            d.deferStartupAudio = false;
             break;
+        }
         if (status != AVERROR(EAGAIN) || d.flushed)
             return E_FAIL;
 
@@ -702,6 +1128,10 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
     frame.width = decoded.width;
     frame.height = decoded.height;
     AVStream* video = d.format->streams[d.video];
+    frame.dvdPts = decoded.best_effort_timestamp == AV_NOPTS_VALUE ? -1 :
+        av_rescale_q(decoded.best_effort_timestamp, video->time_base, av_make_q(1, 90000));
+    frame.subtitleTime = frame.dvdPts < 0 ? -1.0 : frame.dvdPts / 90000.0 -
+        (d.format->start_time == AV_NOPTS_VALUE ? 0 : d.format->start_time / double(AV_TIME_BASE));
     const double rate = d.frameRate;
     frame.duration = decoded.duration > 0
         ? decoded.duration * av_q2d(video->time_base)
@@ -735,32 +1165,139 @@ HRESULT DvdFrameProbe::StartEmbeddedAudio()
     return m_decoder && m_decoder->audio ? m_decoder->audio->Start() : S_FALSE;
 }
 
+bool DvdFrameProbe::RequestNextAudioTrack()
+{
+    if (!m_decoder || m_decoder->discResuming || m_decoder->audioSwitchPending ||
+        !m_decoder->audio) return false;
+    Decoder& d = *m_decoder;
+    ResetEvent(d.seekComplete);
+    d.audioSwitchPending = true;
+    d.audioSwitchRequest = 1;
+    if (SetEvent(d.seekRequest)) return true;
+    d.audioSwitchPending = false;
+    d.audioSwitchRequest = 0;
+    return false;
+}
+
+HRESULT DvdFrameProbe::PollAudioTrack(bool paused, bool muted)
+{
+    Decoder& d = *m_decoder;
+    if (WaitForSingleObject(d.seekComplete, 0) != WAIT_OBJECT_0) return E_PENDING;
+    d.audioSwitchPending = false;
+    if (d.audioSwitchStatus != S_OK) return d.audioSwitchStatus;
+    if (muted) d.audio->SetMuted(true);
+    return paused ? S_OK : d.audio->Start();
+}
+
+bool DvdFrameProbe::RequestSeek(double seconds)
+{
+    if (!m_decoder || !m_decoder->format || !m_decoder->io->seek) return false;
+    Decoder& d = *m_decoder;
+    ResetEvent(d.seekComplete);
+    d.seekTarget = seconds;
+    return SetEvent(d.seekRequest) != FALSE;
+}
+
+HRESULT DvdFrameProbe::PollSeek()
+{
+    Decoder& d = *m_decoder;
+    if (WaitForSingleObject(d.seekComplete, 0) != WAIT_OBJECT_0) return S_FALSE;
+    if (SUCCEEDED(d.seekStatus)) m_untilNext = 0;
+    return d.seekStatus;
+}
+
+bool DvdFrameProbe::ChapterTarget(double position, bool next, double& target) const
+{
+    if (!m_decoder || !m_decoder->chapterCount) return false;
+    const Decoder& d = *m_decoder;
+    if (next)
+    {
+        for (unsigned i = 0; i < d.chapterCount; ++i)
+            if (d.chapters[i] > position + 0.25) { target = d.chapters[i]; return true; }
+    }
+    else
+    {
+        for (unsigned i = d.chapterCount; i > 0; --i)
+            if (d.chapters[i - 1] < position - 2) { target = d.chapters[i - 1]; return true; }
+        target = 0;
+        return true;
+    }
+    return false;
+}
+
+HRESULT DvdFrameProbe::SetEmbeddedAudioMuted(bool muted)
+{
+    return m_decoder && !m_decoder->discResuming && m_decoder->audio
+        ? m_decoder->audio->SetMuted(muted) : E_FAIL;
+}
+
 HRESULT DvdFrameProbe::SetEmbeddedAudioPaused(bool paused)
 {
-    return m_decoder && m_decoder->audio ? m_decoder->audio->SetPaused(paused) : E_FAIL;
+    return m_decoder && !m_decoder->discResuming && m_decoder->audio
+        ? m_decoder->audio->SetPaused(paused) : E_FAIL;
 }
 
 double DvdFrameProbe::DurationSeconds() const
 {
-    return m_decoder ? m_decoder->duration : 0;
+    return m_decoder && !m_decoder->discResuming ? m_decoder->duration : 0;
 }
 
 float DvdFrameProbe::DisplayAspect() const
 {
-    return m_decoder && m_decoder->displayAspect > 0
+    return m_decoder && !m_decoder->discResuming && m_decoder->displayAspect > 0
         ? m_decoder->displayAspect : 4.0f / 3.0f;
 }
 
 double DvdFrameProbe::AdvanceEmbeddedAudio(double fallback)
 {
+    if (m_decoder && m_decoder->discResuming) return 0;
     return m_decoder && m_decoder->audio
         ? m_decoder->audio->Advance(fallback, QueueDepth() == Decoder::QueueCapacity)
         : fallback;
 }
 
+bool DvdFrameProbe::DiscTransitionPending() const
+{
+    return m_decoder && (m_decoder->discResuming || FfmpegDiscUserJumpPending(m_decoder->io));
+}
+
+DvdMenuState DvdFrameProbe::DiscMenuState() const
+{
+    DvdMenuState state = {};
+    if (!m_decoder || m_decoder->discResuming) return state;
+    if (m_decoder->needsFirstDiscPicture && !m_decoder->stillPresented) return state;
+    state = FfmpegDiscMenuState(m_decoder->io, m_decoder->presentedDvdPts);
+    if (state.stillSeconds && !m_decoder->stillPresented)
+        return DvdMenuState();
+    return state;
+}
+
+bool DvdFrameProbe::DiscMenuInput(DvdMenuCommand command)
+{
+    if (command >= DvdMenuUp && command <= DvdMenuActivate && !DiscMenuState().buttons)
+        return false;
+    return m_decoder && !m_decoder->discResuming &&
+        QueueFfmpegDiscMenu(m_decoder->io, command, m_decoder->presentedDvdPts);
+}
+
+void DvdFrameProbe::DrawDiscHighlight(IDirect3DDevice9* device, PlaybackOsd& osd,
+                                       unsigned width, unsigned height, unsigned mode) const
+{
+    const RECT area = DiscMenuState().highlight;
+    if (!m_width || !m_height || area.right <= area.left || area.bottom <= area.top) return;
+    float x, y, u, v;
+    DisplayGeometry(width, height, mode, x, y, u, v);
+    const float sw = 720 * x / (1 - 2 * u), sh = 480 * y / (1 - 2 * v);
+    const float sx = sw / m_width, sy = sh / m_height;
+    osd.DrawMenuFocus(device, (720 - sw) / 2 + area.left * sx,
+                      (480 - sh) / 2 + area.top * sy,
+                      (area.right - area.left) * sx, (area.bottom - area.top) * sy);
+}
+
 unsigned DvdFrameProbe::AudioRecoveryTicks() const
 {
-    return m_decoder && m_decoder->audio ? m_decoder->audio->RecoveryTicks() : 0;
+    return m_decoder && !m_decoder->discResuming && !m_decoder->audioSwitchPending && m_decoder->audio
+        ? m_decoder->audio->RecoveryTicks() : 0;
 }
 
 double DvdFrameProbe::AudioWorkMilliseconds() const
@@ -783,7 +1320,7 @@ void DvdFrameProbe::StartupVideoBuffer(unsigned& queued, unsigned& target, unsig
 
 bool DvdFrameProbe::EmbeddedAudioState(double& milliseconds, unsigned& buffers) const
 {
-    if (!m_decoder || !m_decoder->audio)
+    if (!m_decoder || m_decoder->discResuming || m_decoder->audioSwitchPending || !m_decoder->audio)
         return false;
     UINT64 samples;
     m_decoder->audio->GetPlaybackState(samples, buffers);
@@ -867,12 +1404,12 @@ void DvdFrameProbe::DisplayGeometry(unsigned width, unsigned height, unsigned di
         const float scale = x > y ? x : y;
         if (scale > 1) { x /= scale; y /= scale; }
     }
-    else if (displayMode == 5)
+    else if (displayMode == 5 || displayMode == PlaybackOsd::StockZoomMode)
     {
         // Enlarge a 4:3 letterboxed transfer uniformly to remove baked-in
         // 16:9 mattes; crop the sides too if the output is narrower.
-        const float zoom = (16.0f / 9.0f) / (4.0f / 3.0f);
-        if (sourceAspect < 1.4f)
+        const float zoom = 4.0f / 3.0f;
+        if (displayMode == PlaybackOsd::StockZoomMode || sourceAspect < 1.4f)
         {
             x *= zoom;
             y *= zoom;
@@ -884,20 +1421,82 @@ void DvdFrameProbe::DisplayGeometry(unsigned width, unsigned height, unsigned di
 
 unsigned DvdFrameProbe::SubtitleCount() const
 {
-    return m_decoder ? m_decoder->subtitleCount : 0;
+    if (!m_decoder || m_decoder->discResuming) return 0;
+    Decoder& d = *m_decoder;
+    EnterCriticalSection(&d.queueStats);
+    const unsigned count = d.subtitleCount;
+    LeaveCriticalSection(&d.queueStats);
+    return count;
+}
+
+const char* DvdFrameProbe::TrackLanguage(bool subtitle, unsigned track) const
+{
+    if (!m_decoder || m_decoder->discResuming || m_decoder->audioSwitchPending) return NULL;
+    const Decoder& d = *m_decoder;
+    return subtitle ? (track && track <= SubtitleCount() ? d.subtitleLanguage[track - 1] : NULL)
+                    : (d.audio ? d.audioLanguage : NULL);
+}
+
+const char* DvdFrameProbe::Decoder::ProbeTrackLanguage(bool subtitle, int index) const
+{
+    if (index < 0 || static_cast<unsigned>(index) >= format->nb_streams) return NULL;
+    const AVStream* stream = format->streams[index];
+    const AVDictionaryEntry* language = av_dict_get(stream->metadata, "language", NULL, 0);
+    // Return only immutable literals: the demuxer owns its metadata.
+    unsigned code = 0;
+    if (language && language->value[0] && language->value[1] && !language->value[2])
+        code = (static_cast<unsigned char>(language->value[0]) << 8) |
+                static_cast<unsigned char>(language->value[1]);
+    if (!code && file == INVALID_HANDLE_VALUE)
+    {
+        const unsigned id = stream->id;
+        const bool dvdId = subtitle ? id >= 0x20 && id <= 0x3f :
+            (id >= 0x80 && id <= 0x8f) || (id >= 0xa0 && id <= 0xa7) ||
+            (id >= 0x1c0 && id <= 0x1c7);
+        if (dvdId) code = FfmpegDiscLanguage(io, subtitle, id & (subtitle ? 31 : 7));
+    }
+    struct Language { const char* two; const char* three; const char* name; };
+    static const Language names[] = {
+        {"en","eng","English"}, {"fr","fra","French"}, {"fr","fre","French"},
+        {"es","spa","Spanish"}, {"de","deu","German"}, {"de","ger","German"},
+        {"it","ita","Italian"}, {"pt","por","Portuguese"}, {"ja","jpn","Japanese"},
+        {"zh","zho","Chinese"}, {"zh","chi","Chinese"}, {"ko","kor","Korean"},
+        {"nl","nld","Dutch"}, {"ru","rus","Russian"}, {"pl","pol","Polish"},
+        {"sv","swe","Swedish"}, {"da","dan","Danish"}, {"fi","fin","Finnish"},
+        {"no","nor","Norwegian"}, {"ar","ara","Arabic"}, {"cs","ces","Czech"},
+        {"el","ell","Greek"}, {"he","heb","Hebrew"}, {"tr","tur","Turkish"}
+    };
+    for (unsigned i = 0; i < ARRAYSIZE(names); ++i)
+        if (code == ((unsigned(names[i].two[0]) << 8) | unsigned(names[i].two[1])) ||
+            (language && !strcmp(language->value, names[i].three)))
+            return names[i].name;
+    return "Unknown language";
 }
 
 void DvdFrameProbe::DrawSubtitles(IDirect3DDevice9* device, PlaybackOsd& osd, unsigned width,
                                  unsigned height, unsigned mode, unsigned track, double seconds)
 {
-    if (!m_decoder || !m_width || !m_height) return;
+    if (!m_decoder || m_decoder->discResuming || !m_width || !m_height) return;
     Decoder& d = *m_decoder;
+    const DvdMenuState menu = DiscMenuState();
+    if (d.file == INVALID_HANDLE_VALUE && d.presentedSubtitleTime >= 0 &&
+        !d.needsFirstDiscPicture && !menu.buttons)
+        seconds = d.presentedSubtitleTime;
     const Decoder::Cue* selected = NULL;
     // Only the render thread removes cues. The decoder only appends.
     EnterCriticalSection(&d.queueStats);
     unsigned kept = 0;
     for (unsigned i = 0; i < d.cueCount; ++i)
     {
+        Decoder::Cue& incoming = d.cues[i];
+        if (menu.buttons && incoming.streamId == menu.subpictureId &&
+            incoming.start <= seconds && (!d.heldMenuCue.bitmap.num_rects ||
+            incoming.start >= d.heldMenuCue.start))
+        {
+            avsubtitle_free(&d.heldMenuCue.bitmap);
+            d.heldMenuCue = incoming;
+            continue;
+        }
         if (d.cues[i].end <= seconds)
             avsubtitle_free(&d.cues[i].bitmap);
         else
@@ -910,18 +1509,23 @@ void DvdFrameProbe::DrawSubtitles(IDirect3DDevice9* device, PlaybackOsd& osd, un
         }
     }
     d.cueCount = kept;
+    if (menu.buttons && d.heldMenuCue.streamId == menu.subpictureId &&
+        d.heldMenuCue.start <= seconds &&
+        (menu.stillSeconds || seconds < d.heldMenuCue.end))
+        selected = &d.heldMenuCue;
     LeaveCriticalSection(&d.queueStats);
     if (!selected || !osd.Ready()) return;
     float x, y, u, v;
     DisplayGeometry(width, height, mode, x, y, u, v);
-    const float sw = 1280 * x / (1 - 2 * u), sh = 720 * y / (1 - 2 * v);
+    const float sw = width * x / (1 - 2 * u), sh = height * y / (1 - 2 * v);
     const float sx = sw / m_width, sy = sh / m_height;
     for (unsigned i = 0; i < selected->bitmap.num_rects; ++i)
     {
         const AVSubtitleRect& rect = *selected->bitmap.rects[i];
         if (rect.type == SUBTITLE_BITMAP && rect.data[0] && rect.data[1])
-            osd.DrawBitmap(device, (1280 - sw) / 2 + rect.x * sx,
-                           (720 - sh) / 2 + rect.y * sy, sx, sy, rect.w, rect.h,
+            osd.DrawBitmap(device, ((width - sw) / 2 + rect.x * sx) * 720.0f / width,
+                           ((height - sh) / 2 + rect.y * sy) * 480.0f / height,
+                           sx * 720.0f / width, sy * 480.0f / height, rect.w, rect.h,
                            rect.data[0], rect.linesize[0], rect.data[1], rect.nb_colors);
     }
 }

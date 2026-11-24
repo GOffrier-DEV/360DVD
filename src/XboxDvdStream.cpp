@@ -1,6 +1,7 @@
 #include "XboxDvdStream.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <limits.h>
 #include <sys/uio.h>
 
@@ -32,9 +33,12 @@ extern "C" LONG NTAPI NtReadFile(HANDLE, HANDLE, void*, void*, DvdIoStatus*,
 namespace
 {
     const DWORD kSectorSize = 2048;
+    const DWORD kReadBatch = 128 * 1024;
     const ULONG kCaseInsensitive = 0x40;
     const ULONG kSynchronousNonAlert = 0x20;
     const LONG kInvalidParameter = (LONG)0xC000000D;
+    const LONG kInvalidDeviceRequest = (LONG)0xC0000010;
+    const LONG kInvalidBufferSize = (LONG)0xC0000206;
     const LONG kDeviceDataError = (LONG)0xC000009C;
 
     int StreamSeek(void* stream, uint64_t offset)
@@ -92,6 +96,14 @@ dvdcss_stream_cb* XboxDvdStream::CssCallbacks()
     return &callbacks;
 }
 
+dvd_reader_stream_cb* XboxDvdStream::ReaderAuthCallbacks()
+{
+    static dvd_reader_stream_cb callbacks = {
+        StreamSeek, StreamRead, ReaderReadVectors
+    };
+    return &callbacks;
+}
+
 dvdcss_stream_cb* XboxDvdStream::CssAuthCallbacks()
 {
     static dvdcss_stream_cb callbacks = {
@@ -107,13 +119,15 @@ int XboxDvdStream::CssDeviceFd() const
 
 extern "C" int dvd360_css_stream_fd(void* stream, const dvdcss_stream_cb* callbacks)
 {
-    if (callbacks != XboxDvdStream::CssAuthCallbacks())
+    if (callbacks != XboxDvdStream::CssAuthCallbacks() &&
+        static_cast<const void*>(callbacks) != XboxDvdStream::ReaderAuthCallbacks())
         return -1;
     return static_cast<XboxDvdStream*>(stream)->CssDeviceFd();
 }
 
 XboxDvdStream::XboxDvdStream()
-    : m_device(INVALID_HANDLE_VALUE), m_position(0), m_status(0)
+    : m_device(INVALID_HANDLE_VALUE), m_readStorage(NULL), m_readLimit(kReadBatch),
+      m_position(0), m_status(0)
 {
 }
 
@@ -148,6 +162,9 @@ void XboxDvdStream::Close()
     if (IsOpen())
         CloseHandle(m_device);
     m_device = INVALID_HANDLE_VALUE;
+    free(m_readStorage);
+    m_readStorage = NULL;
+    m_readLimit = kReadBatch;
     m_position = 0;
 }
 
@@ -180,27 +197,44 @@ int XboxDvdStream::Read(void* buffer, int byteCount)
         return -1;
     }
 
-    // Probe one sector at a time; no shared buffer between stream instances.
+    // Keep the aligned staging buffer private to this drive session.
+    if (byteCount > (int)kSectorSize && m_readLimit > kSectorSize && !m_readStorage)
+    {
+        m_readStorage = static_cast<unsigned char*>(malloc(kReadBatch + kSectorSize - 1));
+        if (!m_readStorage) m_readLimit = kSectorSize;
+    }
     unsigned char storage[2 * kSectorSize - 1];
-    unsigned char* aligned = storage +
-        ((0 - (ULONG_PTR)storage) & (kSectorSize - 1));
+    unsigned char* base = m_readStorage ? m_readStorage : storage;
+    unsigned char* aligned = base + ((0 - (ULONG_PTR)base) & (kSectorSize - 1));
     unsigned char* output = (unsigned char*)buffer;
     int total = 0;
     while (total < byteCount)
     {
+        const ULONG remaining = byteCount - total;
+        const ULONG limit = m_readStorage ? m_readLimit : kSectorSize;
+        const ULONG requested = remaining < limit ? remaining : limit;
         LARGE_INTEGER offset;
         offset.QuadPart = m_position;
         DvdIoStatus io = {};
         m_status = NtReadFile(m_device, NULL, NULL, NULL, &io, aligned,
-                              kSectorSize, &offset);
+                              requested, &offset);
         if (m_status == 0)
             m_status = io.status;
         if (m_status != 0)
+        {
+            if (requested > kSectorSize &&
+                (m_status == kInvalidParameter || m_status == kInvalidDeviceRequest ||
+                 m_status == kInvalidBufferSize))
+            {
+                m_readLimit = ((requested / kSectorSize) / 2) * kSectorSize;
+                continue; // Retry the same offset with a smaller transfer.
+            }
             return total ? total : -1;
+        }
         const ULONG_PTR received = io.information;
         if (received == 0)
             break;
-        if (received != kSectorSize)
+        if (received > requested || (received % kSectorSize) != 0)
         {
             m_status = kDeviceDataError;
             return total ? total : -1;

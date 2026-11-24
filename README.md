@@ -18,6 +18,10 @@ added.
 Disc I/O, DVD navigation, CSS handling, and audio output are not implemented
 yet.
 
+## DVD navigation notes
+
+- [Main-disc country selection: France vs. United Kingdom](docs/dvd-country-selection.md)
+
 ## Video API baseline
 
 `docs/video-api-surface.json` records the required declared Xbox 360 API

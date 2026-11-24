@@ -45,7 +45,7 @@
     <ClCompile Include="deps\libdvdread\src\file\file_posix.c" />
     <ClCompile Include="deps\libdvdnav\src\dvdnav.c" />
     <ClCompile Include="deps\libdvdnav\src\highlight.c" />
-    <ClCompile Include="deps\libdvdnav\src\logger.c"><ObjectFileName>$(IntDir)dvdnav_logger.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="port\xbox360\dvdnav_logger.c" />
     <ClCompile Include="deps\libdvdnav\src\navigation.c" />
     <ClCompile Include="deps\libdvdnav\src\read_cache.c" />
     <ClCompile Include="deps\libdvdnav\src\searching.c" />

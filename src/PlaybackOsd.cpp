@@ -3,9 +3,31 @@
 #include <d3dx9.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 namespace
 {
+    HRESULT APIENTRY LoadStockTexture(IXuiDevice* device, LPCWSTR locator,
+                                      XUIImageInfo* info, IDirect3DTexture9** texture)
+    {
+        if (!locator) return E_INVALIDARG;
+        // The dashboard uses its own resource locators. Read the bundled
+        // DVD icons directly and let XUI decode the original PNG bytes.
+        const wchar_t* name = locator;
+        for (const wchar_t* p = locator; *p; ++p)
+            if (*p == L'/' || *p == L'\\') name = p + 1;
+        if (wcsncmp(name, L"ico_32x_", 8) != 0)
+            return XuiPNGTextureLoader(device, locator, info, texture);
+        char path[160];
+        sprintf_s(path, sizeof(path), "game:\\Media\\Blades\\%ls", name);
+        FILE* file = fopen(path, "rb");
+        if (!file) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        BYTE png[4096];
+        const size_t size = fread(png, 1, sizeof(png), file);
+        fclose(file);
+        if (!size || size == sizeof(png)) return E_FAIL;
+        return XuiCreateTextureFromPNG(png, static_cast<DWORD>(size), device, texture, info);
+    }
     enum { AtlasWidth = 512, AtlasHeight = 256, CellSize = 32 };
     const char kVs[] = "void main(float4 p:POSITION,float4 c:COLOR0,float2 uv:TEXCOORD0,float3 box:TEXCOORD1,"
         "out float4 pos:POSITION,out float4 col:COLOR0,out float2 tc:TEXCOORD0,out float3 b:TEXCOORD1)"
@@ -33,17 +55,157 @@ namespace
 }
 
 PlaybackOsd::PlaybackOsd() : m_vs(NULL), m_ps(NULL), m_decl(NULL), m_atlas(NULL), m_selected(0),
-    m_count(0), m_visible(0), m_openAmount(0), m_focus(0), m_panelOffset(0)
+    m_trackPopupTime(0), m_count(0), m_visible(0), m_openAmount(0), m_focus(0), m_panelOffset(0),
+    m_stockPopup(NULL), m_stockDc(NULL), m_stockRender(false), m_stockRuntime(false),
+    m_stockPage(0), m_stockInfo(false)
 {
     memset(m_buttons, 0, sizeof(m_buttons));
+    memset(m_stockScenes, 0, sizeof(m_stockScenes));
+    m_stockPlayState[0] = m_stockPlayState[1] = -1;
 }
 
 PlaybackOsd::~PlaybackOsd()
 {
+    CloseStock();
     if (m_decl) m_decl->Release();
     if (m_ps) m_ps->Release();
     if (m_vs) m_vs->Release();
     if (m_atlas) m_atlas->Release();
+}
+
+HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS* present,
+                               const char*& stage)
+{
+    stage = "Stock XUI: renderer initialization";
+    HRESULT hr = XuiRenderInitShared(device, present, LoadStockTexture);
+    if (FAILED(hr)) return hr;
+    m_stockRender = true;
+    stage = "Stock XUI: create device context";
+    hr = XuiRenderCreateDC(&m_stockDc);
+    if (SUCCEEDED(hr))
+    {
+        stage = "Stock XUI: runtime initialization";
+        XUIInitParams params = {};
+        params.cbSize = sizeof(params);
+        params.dwFlags = XUI_INIT_PARAMS_FLAGS_NOKEYBOARD;
+        hr = XuiInit(&params);
+        m_stockRuntime = SUCCEEDED(hr);
+    }
+    const wchar_t root[] = L"file://game:/Media/Blades/";
+    if (SUCCEEDED(hr))
+    {
+        stage = "Stock XUI: register DVD typeface";
+        TypefaceDescriptor typeface = { L"Xenon", L"file://game:/Media/Blades/XenonCLatin.ttf" };
+        hr = XuiRegisterTypeface(&typeface, TRUE);
+    }
+    if (SUCCEEDED(hr))
+    {
+        stage = "Stock XUI: load DVD skin";
+        hr = XuiLoadVisualFromBinary(L"file://game:/Media/Blades/dvd_skin.xur", NULL);
+    }
+    if (SUCCEEDED(hr))
+    {
+        stage = "Stock XUI: create Playback scene";
+        hr = XuiSceneCreate(root, L"DvdPadPlayback.xur", NULL, &m_stockScenes[0]);
+    }
+    if (SUCCEEDED(hr))
+    {
+        stage = "Stock XUI: create Display scene";
+        hr = XuiSceneCreate(root, L"DvdPadDisplay.xur", NULL, &m_stockScenes[1]);
+    }
+    if (FAILED(hr)) CloseStock();
+    else
+    {
+        stage = SUCCEEDED(XuiSceneCreate(root, L"DvdTrackPopup.xur", NULL, &m_stockPopup))
+            ? "Stock XUI: ready" : "Stock XUI: ready (track popup asset unavailable)";
+    }
+    return hr;
+}
+
+void PlaybackOsd::CloseStock()
+{
+    if (m_stockPopup) XuiDestroyObject(m_stockPopup);
+    m_stockPopup = NULL;
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (m_stockScenes[i]) XuiDestroyObject(m_stockScenes[i]);
+        m_stockScenes[i] = NULL;
+    }
+    if (m_stockDc) XuiRenderDestroyDC(m_stockDc);
+    if (m_stockRuntime) XuiUninit();
+    if (m_stockRender) XuiRenderUninit();
+    m_stockDc = NULL;
+    m_stockRuntime = m_stockRender = false;
+}
+
+void PlaybackOsd::DrawStock(bool paused, double elapsed, double position, double duration,
+                            const char* audioLanguage, bool muted, const char* subtitleLanguage,
+                            unsigned subtitle)
+{
+    if (!UsesStock()) return;
+    const bool popup = m_stockPopup && m_trackPopupTime > 0 &&
+        (m_trackPopupTime -= elapsed) > 0;
+    if (m_visible <= 0 && !popup) return;
+    XuiAnimRun(static_cast<float>(elapsed * 1000));
+    XuiTimersRun();
+    HXUIOBJ scene = m_stockScenes[m_stockPage], play;
+    if (m_stockPage && (m_selected == 1 || m_selected == 3))
+    {
+        HXUIOBJ label;
+        if (SUCCEEDED(XuiElementGetChildById(scene, L"txt_Action", &label)))
+        {
+            wchar_t text[96];
+            if (m_selected == 1 && subtitle)
+                swprintf_s(text, ARRAYSIZE(text), L"Subtitles %u: %hs", subtitle,
+                           subtitleLanguage ? subtitleLanguage : "Unknown language");
+            else if (m_selected == 1)
+                swprintf_s(text, ARRAYSIZE(text), L"Subtitles: Off");
+            else
+                swprintf_s(text, ARRAYSIZE(text), L"Audio: %hs%ls",
+                           audioLanguage ? audioLanguage : "Unavailable", muted ? L" (Muted)" : L"");
+            XuiControlSetText(label, text);
+        }
+    }
+    else if (m_stockInfo)
+    {
+        HXUIOBJ label;
+        if (SUCCEEDED(XuiElementGetChildById(scene, L"txt_Action", &label)))
+        {
+            char current[16], total[16];
+            wchar_t text[64];
+            Clock(current, sizeof(current), position);
+            Clock(total, sizeof(total), duration - position);
+            if (duration > 0)
+                swprintf_s(text, ARRAYSIZE(text), L"%hs / -%hs", current, total);
+            else
+                swprintf_s(text, ARRAYSIZE(text), L"%hs / --:--", current);
+            XuiControlSetText(label, text);
+        }
+    }
+    if (m_stockPlayState[m_stockPage] != int(paused) &&
+        SUCCEEDED(XuiElementGetChildById(scene, L"btn_Play", &play)) &&
+        SUCCEEDED(XuiControlSetImagePath(play, paused ?
+            L"file://game:/Media/Blades/ico_32x_play_black.png" :
+            L"file://game:/Media/Blades/ico_32x_pause_black.png")))
+        m_stockPlayState[m_stockPage] = int(paused);
+    if (SUCCEEDED(XuiRenderBegin(m_stockDc, 0)))
+    {
+        XUIMessage msg;
+        XUIMessageRender render;
+        XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
+        if (m_visible > 0) XuiSendMessage(scene, &msg);
+        if (popup)
+        {
+            const double fade = m_trackPopupTime < 0.25 ? m_trackPopupTime :
+                m_trackPopupTime > 2.35 ? 2.5 - m_trackPopupTime : 0.25;
+            const float opacity = static_cast<float>(fade *
+                (m_trackPopupTime > 2.35 ? 1.0 / 0.15 : 4.0));
+            XuiElementSetOpacity(m_stockPopup, opacity);
+            XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
+            XuiSendMessage(m_stockPopup, &msg);
+        }
+        XuiRenderEnd(m_stockDc);
+    }
 }
 
 HRESULT PlaybackOsd::Open(IDirect3DDevice9* device)
@@ -92,7 +254,7 @@ HRESULT PlaybackOsd::Open(IDirect3DDevice9* device)
     return device->CreateVertexDeclaration(elements, &m_decl);
 }
 
-PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused)
+PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused, bool discButtons, bool discStill)
 {
     const float step = elapsed < 0.05 ? static_cast<float>(elapsed) : 0.05f;
     if (m_visible > 0)
@@ -126,14 +288,87 @@ PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused)
     if (!pressed)
         return None;
     const bool wasVisible = m_visible > 0;
+    if (!wasVisible && (discButtons || discStill))
+    {
+        if (pressed & (XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK))
+        {
+            m_visible = 4;
+            return None;
+        }
+        if (discButtons)
+        {
+            if (pressed & XINPUT_GAMEPAD_DPAD_UP) return DiscUp;
+            if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) return DiscDown;
+            if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) return DiscLeft;
+            if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) return DiscRight;
+        }
+        if (pressed & XINPUT_GAMEPAD_A) return discButtons ? DiscActivate : DiscContinue;
+        return None;
+    }
     if (wasVisible && (pressed & XINPUT_GAMEPAD_B))
     {
+        if (UsesStock() && m_stockPage)
+        {
+            m_stockPage = 0;
+            m_stockInfo = false;
+            m_selected = 0;
+            HXUIOBJ play;
+            if (SUCCEEDED(XuiElementGetChildById(m_stockScenes[0], L"btn_Play", &play)))
+                XuiElementSetFocus(play);
+            return None;
+        }
+        m_stockInfo = false;
         m_visible = 0;
         return None;
     }
     m_visible = 4;
     if (pressed & XINPUT_GAMEPAD_START)
+    {
+        if (!wasVisible && UsesStock()) m_selected = 0;
         return TogglePause;
+    }
+    if (UsesStock())
+    {
+        static const wchar_t* const ids[2][8] = {
+            {L"btn_Play", L"btn_Last", L"btn_RR", L"btn_Stop", L"btn_FF", L"btn_Next", L"btn_DVDMenu", L"btn_Title"},
+            {L"btn_Play", L"btn_SubTitles", L"btn_Camera", L"btn_Sound", L"btn_Aspect", L"btn_Zoom", L"btn_AB", L"btn_Info"}
+        };
+        if (!wasVisible) m_selected = 0;
+        if (pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) m_stockInfo = false;
+        if (wasVisible && (pressed & XINPUT_GAMEPAD_DPAD_LEFT)) m_selected = (m_selected + 8) % 9;
+        if (wasVisible && (pressed & XINPUT_GAMEPAD_DPAD_RIGHT)) m_selected = (m_selected + 1) % 9;
+        Action action = None;
+        if (wasVisible && (pressed & XINPUT_GAMEPAD_A))
+        {
+            if (!m_selected) action = TogglePause;
+            else if (!m_stockPage && m_selected == 1) action = PreviousChapter;
+            else if (!m_stockPage && m_selected == 2) action = Rewind;
+            else if (!m_stockPage && m_selected == 3) action = Stop;
+            else if (!m_stockPage && m_selected == 4) action = FastForward;
+            else if (!m_stockPage && m_selected == 5) action = NextChapter;
+            else if (!m_stockPage && m_selected == 6) action = DiscRoot;
+            else if (!m_stockPage && m_selected == 7) action = DiscTitle;
+            else if (m_selected == 8) { m_stockPage ^= 1; m_selected = 0; m_stockInfo = false; }
+            else if (m_stockPage && m_selected == 1) action = SubtitleTrack;
+            else if (m_stockPage && m_selected == 3) action = NextAudioTrack;
+            else if (m_stockPage && m_selected == 4) action = DisplayMode;
+            else if (m_stockPage && m_selected == 5) action = ToggleZoom;
+            else if (m_stockPage && m_selected == 6) action = RepeatAB;
+            else if (m_stockPage && m_selected == 7) m_stockInfo = !m_stockInfo;
+        }
+        HXUIOBJ focused;
+        const wchar_t* id = m_selected < 8 ? ids[m_stockPage][m_selected] :
+            (m_stockPage ? L"btn_Playback" : L"btn_Display");
+        if (SUCCEEDED(XuiElementGetChildById(m_stockScenes[m_stockPage], id, &focused)))
+        {
+            XuiElementSetFocus(focused);
+            HXUIOBJ label;
+            const wchar_t* text = XuiControlGetText(focused);
+            if (text && SUCCEEDED(XuiElementGetChildById(m_stockScenes[m_stockPage], L"txt_Action", &label)))
+                XuiControlSetText(label, text);
+        }
+        return action;
+    }
     if (wasVisible && (pressed & XINPUT_GAMEPAD_DPAD_LEFT))
         m_selected = (m_selected + 2) % 3;
     if (wasVisible && (pressed & XINPUT_GAMEPAD_DPAD_RIGHT))
@@ -149,6 +384,18 @@ void PlaybackOsd::Rect(float x, float y, float w, float h, DWORD color)
          0.5f / AtlasWidth, 0.5f / AtlasHeight);
 }
 
+void PlaybackOsd::DrawMenuFocus(IDirect3DDevice9* device, float x, float y, float width, float height)
+{
+    m_count = 0;
+    m_panelOffset = 0;
+    const DWORD color = 0xD0E9F8BD;
+    Rect(x, y, width, 2, color);
+    Rect(x, y + height - 2, width, 2, color);
+    Rect(x, y, 2, height, color);
+    Rect(x + width - 2, y, 2, height, color);
+    Submit(device);
+}
+
 void PlaybackOsd::Panel(float x, float y, float w, float h, float radius, DWORD top, DWORD bottom)
 {
     if (m_count + 6 > sizeof(m_vertices) / sizeof(*m_vertices)) return;
@@ -157,9 +404,9 @@ void PlaybackOsd::Panel(float x, float y, float w, float h, float radius, DWORD 
     if (radius > halfH) radius = halfH;
     // Leave room outside the shape for the shader's coverage ramp.
     const float u = halfW + 2, v = halfH + 2;
-    const float l = (x - 2) / 640 - 1, r = (x + w + 2) / 640 - 1;
-    const float t = 1 - (y + m_panelOffset - 2) / 360;
-    const float b = 1 - (y + m_panelOffset + h + 2) / 360;
+    const float l = 2 * (x - 2) / SceneWidth - 1, r = 2 * (x + w + 2) / SceneWidth - 1;
+    const float t = 1 - 2 * (y + m_panelOffset - 2) / SceneHeight;
+    const float b = 1 - 2 * (y + m_panelOffset + h + 2) / SceneHeight;
     const Vertex tl = {l,t,0,1,top,-u,-v,halfW,halfH,radius};
     const Vertex tr = {r,t,0,1,top, u,-v,halfW,halfH,radius};
     const Vertex bl = {l,b,0,1,bottom,-u,v,halfW,halfH,radius};
@@ -175,8 +422,8 @@ void PlaybackOsd::Quad(float x, float y, float w, float h, DWORD color,
     if (m_count + 6 > sizeof(m_vertices) / sizeof(*m_vertices))
         return;
     y += m_panelOffset;
-    const float l = x / 640 - 1, r = (x + w) / 640 - 1;
-    const float t = 1 - y / 360, b = 1 - (y + h) / 360;
+    const float l = 2 * x / SceneWidth - 1, r = 2 * (x + w) / SceneWidth - 1;
+    const float t = 1 - 2 * y / SceneHeight, b = 1 - 2 * (y + h) / SceneHeight;
     const Vertex quad[] = {{l,t,0,1,color,u0,v0},{r,t,0,1,color,u1,v0},{l,b,0,1,color,u0,v1},
                            {l,b,0,1,color,u0,v1},{r,t,0,1,color,u1,v0},{r,b,0,1,color,u1,v1}};
     memcpy(m_vertices + m_count, quad, sizeof(quad));
@@ -200,13 +447,49 @@ void PlaybackOsd::Text(float x, float y, const char* text, DWORD color, float sc
     }
 }
 
+void PlaybackOsd::ShowTrackPopup(bool subtitle, unsigned track, const char* language, bool muted)
+{
+    if (subtitle && track)
+        sprintf_s(m_trackPopup, sizeof(m_trackPopup), "Subtitles %u: %s", track,
+                  language ? language : "Unknown language");
+    else if (subtitle)
+        sprintf_s(m_trackPopup, sizeof(m_trackPopup), "Subtitles: %s", language ? language : "Off");
+    else
+        sprintf_s(m_trackPopup, sizeof(m_trackPopup), "Audio: %s%s",
+                  language ? language : "Unavailable", muted ? " (Muted)" : "");
+    m_trackPopupTime = 2.5;
+    HXUIOBJ label;
+    if (m_stockPopup && SUCCEEDED(XuiElementGetChildById(m_stockPopup, L"txt_Action", &label)))
+    {
+        wchar_t text[96];
+        swprintf_s(text, ARRAYSIZE(text), L"%hs", m_trackPopup);
+        XuiControlSetText(label, text);
+    }
+}
+
+void PlaybackOsd::DrawTrackPopup(IDirect3DDevice9* device, double elapsed)
+{
+    if (m_stockPopup || !Ready() || m_trackPopupTime <= 0 || (m_trackPopupTime -= elapsed) <= 0) return;
+    const float scale = 0.8f;
+    float width = 0;
+    for (const char* p = m_trackPopup; *p; ++p)
+        width += m_widths[static_cast<unsigned char>(*p)] * scale;
+    const float x = (SceneWidth - width) / 2;
+    m_count = 0;
+    m_panelOffset = 0;
+    Panel(x - 12, 303, width + 24, 30, 14, 0xF0EBEBEB, 0xE0AEB0B0);
+    Text(x, 309, m_trackPopup, 0xFF273633, scale);
+    Submit(device);
+}
+
 void PlaybackOsd::Draw(IDirect3DDevice9* device, unsigned, unsigned,
                        bool paused, unsigned mode, double seconds, double duration,
                        unsigned subtitle, unsigned subtitleCount)
 {
     if (!m_decl || m_openAmount <= 0) return;
     const float closed = 1 - m_openAmount;
-    m_panelOffset = 190 * closed * closed;
+    // Keep the legend inside the 480-line title-safe area.
+    m_panelOffset = -30 + 138 * closed * closed;
     static const char* const modes[DisplayModeCount] = {
         "Auto", "Letterbox", "Fullscreen", "Stretch", "Native", "Letterbox Zoom"
     };
@@ -216,52 +499,48 @@ void PlaybackOsd::Draw(IDirect3DDevice9* device, unsigned, unsigned,
     sprintf_s(display, sizeof(display), "\x03 %s", modes[mode % DisplayModeCount]);
     m_count = 0;
     const DWORD ink = 0xFF273633;
-    Panel(68, 532, 1144, 130, 19, 0x28000000, 0x80000000);
-    Panel(73, 527, 1134, 130, 16, 0xFFFDFEF8, 0xFF81908B);
-    Panel(75, 529, 1130, 126, 14, 0xFFF6F7EF, 0xFFD0D9D0);
-    Panel(86, 535, 1108, 45, 11, 0xFFC9D9E2, 0xFFE3ECED);
-    Panel(94, 549, 1092, 6, 3, 0xFF8B9C9D, 0xFFBDC8C9);
+    // DvdPadPlayback.xui anchors the circle at (139,376), the control
+    // strip at (150,385), and the action strip at (185,417).
+    Panel(139, 376, 80, 80, 40, 0xFFEBEBEB, 0xC8EBEBEB);
+    Panel(185, 417, 373, 29, 14, 0xF0EBEBEB, 0xC8AEB0B0);
+    Panel(150, 385, 485, 53, 24, 0xF0EBEBEB, 0xC8AEB0B0);
+    Panel(229, 369, 322, 4, 2, 0xC8828282, 0xC8EBEBEB);
     if (duration > 0)
     {
         const double fraction = seconds > duration ? 1.0 : seconds / duration;
         if (fraction > 0)
-            Panel(94, 549, static_cast<float>(1092 * fraction), 6,
-                  fraction < 0.006 ? 0 : 3, 0xFFC8E87C, 0xFF74A637);
+            Panel(229, 369, static_cast<float>(322 * fraction), 4,
+                  2, 0xFFC8E87C, 0xFF74A637);
     }
-    Text(94, 556, time, ink, 0.85f);
-    Text(578, 556, paused ? "DVD  |  Paused" : "DVD  |  Playing", 0xFF344F5D, 0.85f);
+    Text(233, 425, time, ink, 0.7f);
+    Text(330, 425, paused ? "DVD  |  Paused" : "DVD  |  Playing", ink, 0.7f);
     if (duration > 0)
     {
-        Text(1078, 556, "-", ink, 0.85f);
-        Text(1090, 556, remaining, ink, 0.85f);
+        Text(466, 425, "-", ink, 0.7f);
+        Text(476, 425, remaining, ink, 0.7f);
     }
-    const float selection[] = {88, 249, 629};
-    const float selectionWidth[] = {157, 376, 550};
+    const float selection[] = {155, 220, 427};
+    const float selectionWidth[] = {62, 204, 202};
     for (unsigned i = 0; i < 3; ++i)
     {
-        Panel(selection[i], 585, selectionWidth[i], 39, 9, 0xFFFDFEF9, 0xFF9FABA3);
-        Panel(selection[i]+1, 586, selectionWidth[i]-2, 36, 8, 0xFFF5F8F2, 0xFFD7E0D7);
+        Panel(selection[i], 388, selectionWidth[i], 39, 18, 0xFFEBEBEB, 0xFFAEB0B0);
     }
     const unsigned left = m_focus < 1 ? 0 : 1;
     const float fraction = m_focus - left;
     const float focusX = selection[left] + fraction * (selection[left+1] - selection[left]);
     const float focusW = selectionWidth[left] + fraction * (selectionWidth[left+1] - selectionWidth[left]);
-    Panel(focusX, 584, focusW, 41, 10, 0xFFECF9C5, 0xFF759347);
-    Panel(focusX+1, 585, focusW-2, 38, 9, 0xFFE9F8BD, 0xFFA8CD64);
-    Panel(focusX+4, 587, focusW-8, 12, 5, 0xAEFFFFFF, 0x00FFFFFF);
-    Text(105, 590, paused ? "\x01 Play" : "\x02 Pause", ink);
-    Text(266, 590, display, ink);
+    Panel(focusX, 388, focusW, 39, 18, 0xFFECF9C5, 0xFF759347);
+    Panel(focusX+2, 390, focusW-4, 34, 16, 0xFFE9F8BD, 0xFFA8CD64);
+    Text(170, 391, paused ? "\x01" : "\x02", ink);
+    Text(230, 395, display, ink, 0.8f);
     char subtitles[32];
     if (subtitle)
         sprintf_s(subtitles, sizeof(subtitles), "\x04 Subtitles %u", subtitle);
     else
         strcpy_s(subtitles, sizeof(subtitles), subtitleCount ? "\x04 Subtitles Off" : "\x04 No subtitles");
-    Text(646, 590, subtitles, ink);
-    Text(90, 628, "\x05", 0xFF386317, 0.85f);
-    Text(120, 628, "Select", ink, 0.85f);
-    Text(207, 628, "\x06", 0xFF973725, 0.85f);
-    Text(237, 628, "Back", ink, 0.85f);
-    Text(307, 628, "\x08 Navigate     \x07 Play / Pause", ink, 0.85f);
+    Text(437, 395, subtitles, ink, 0.8f);
+    Panel(213, 448, 416, 27, 12, 0xF0EBEBEB, 0xE0AEB0B0);
+    Text(223, 451, "\x05 Select    \x06 Back    \x08 Navigate    \x07 Play / Pause", ink, 0.7f);
     Submit(device);
     m_panelOffset = 0;
 }

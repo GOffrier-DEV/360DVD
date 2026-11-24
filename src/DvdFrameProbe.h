@@ -3,6 +3,7 @@
 
 #include <d3d9.h>
 #include <stdio.h>
+#include "FfmpegFileIo.h"
 
 class PlaybackOsd;
 
@@ -13,11 +14,26 @@ public:
     ~DvdFrameProbe();
     HRESULT Load(IDirect3DDevice9* device, HANDLE file);
     HRESULT DecodeMpeg2(IDirect3DDevice9* device, HANDLE file);
+    void Stop();
     HRESULT StartEmbeddedAudio();
+    bool RequestNextAudioTrack();
+    HRESULT PollAudioTrack(bool paused, bool muted);
     HRESULT SetEmbeddedAudioPaused(bool paused);
+    HRESULT SetEmbeddedAudioMuted(bool muted);
+    bool RequestSeek(double seconds);
+    HRESULT PollSeek();
+    bool ChapterTarget(double position, bool next, double& target) const;
     double DurationSeconds() const;
     float DisplayAspect() const;
     unsigned SubtitleCount() const;
+    const char* TrackLanguage(bool subtitle, unsigned track = 0) const;
+    unsigned ChapterCount() const;
+    unsigned DiscSegment() const { return m_discSegment; }
+    DvdMenuState DiscMenuState() const;
+    bool DiscTransitionPending() const;
+    bool DiscMenuInput(DvdMenuCommand command);
+    void DrawDiscHighlight(IDirect3DDevice9* device, PlaybackOsd& osd, unsigned width,
+                           unsigned height, unsigned mode) const;
     void DrawSubtitles(IDirect3DDevice9* device, PlaybackOsd& osd, unsigned width,
                        unsigned height, unsigned mode, unsigned track, double seconds);
     double AdvanceEmbeddedAudio(double fallback);
@@ -26,7 +42,8 @@ public:
     unsigned AudioRecoveryTicks() const;
     double AudioWorkMilliseconds() const;
     unsigned VideoPacketHighWater() const { return m_videoPacketHighWater; }
-    HRESULT Advance(IDirect3DDevice9* device, double elapsed, bool audioMaster = false);
+    HRESULT Advance(IDirect3DDevice9* device, double elapsed, bool audioMaster = false,
+                    double wallElapsed = 0);
     unsigned FramesReady() const { return m_framesReady; }
     unsigned LateByFrame() const { return m_lateByFrame; }
     unsigned AudioSyncDrops() const { return m_audioSyncDrops; }
@@ -66,6 +83,7 @@ private:
     struct Decoder;
     Decoder* m_decoder;
     unsigned m_width, m_height;
+    unsigned m_discSegment;
     double m_untilNext;
     unsigned m_framesReady, m_lateByFrame;
     unsigned m_audioSyncDrops;

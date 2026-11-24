@@ -11,9 +11,20 @@ public:
     ~DvdFrameProbe();
     HRESULT Load(IDirect3DDevice9* device, FILE* file);
     HRESULT DecodeMpeg2(IDirect3DDevice9* device, FILE* file);
-    void Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const;
+    HRESULT Advance(IDirect3DDevice9* device, double elapsed);
+    unsigned FramesReady() const { return m_framesReady; }
+    unsigned LateByFrame() const { return m_lateByFrame; }
+    double MaxLateSeconds() const { return m_maxLate; }
+    HRESULT Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const;
 
 private:
+    HRESULT NextFrame(IDirect3DDevice9* device);
+    struct Decoder;
+    Decoder* m_decoder;
+    unsigned m_width, m_height;
+    double m_untilNext;
+    unsigned m_framesReady, m_lateByFrame;
+    double m_maxLate;
     HRESULT LoadPlanes(IDirect3DDevice9* device, unsigned width, unsigned height,
                        const unsigned char* const planes[3], unsigned stride);
     DvdFrameProbe(const DvdFrameProbe&);

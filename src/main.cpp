@@ -292,12 +292,18 @@ namespace
         FILE* fixture = fopen("game:\\mpeg2-probe.m2v", "rb");
         const bool compressed = fixture != NULL;
         if (!fixture)
+        {
+            const DWORD attrs = GetFileAttributes("game:\\mpeg2-probe.m2v");
+            const DWORD error = attrs == (DWORD)-1 ? GetLastError() : ERROR_OPEN_FAILED;
+            BootLog("Could not open game:\\mpeg2-probe.m2v", HRESULT_FROM_WIN32(error));
             fixture = fopen("game:\\dvd-frame.yuv", "rb");
+        }
         if (fixture)
         {
             const HRESULT frameStatus = compressed ? frame.DecodeMpeg2(device, fixture)
                                                    : frame.Load(device, fixture);
-            fclose(fixture);
+            if (!compressed)
+                fclose(fixture);
             showFrame = SUCCEEDED(frameStatus);
             BootLog(compressed ? (showFrame ? "CPU MPEG-2 frame ready" : "CPU MPEG-2 probe failed")
                                : (showFrame ? "YUV test frame ready" : "YUV test frame failed"),
@@ -314,6 +320,9 @@ namespace
         LARGE_INTEGER previous;
         QueryPerformanceFrequency(&frequency);
         QueryPerformanceCounter(&previous);
+        unsigned presentedFrames = 0;
+        unsigned lastPresented = 0;
+        unsigned missedFrames = 0;
 
         for (;;)
         {
@@ -323,17 +332,57 @@ namespace
                                   (float)frequency.QuadPart;
             previous = now;
 
+            bool playbackEnded = false;
+            if (showFrame && compressed)
+            {
+                const unsigned before = frame.FramesReady();
+                const HRESULT status = frame.Advance(device, elapsed);
+                if (frame.FramesReady() != before && lastPresented != before)
+                    ++missedFrames;
+                if (status == S_FALSE)
+                {
+                    BootLog("CPU MPEG-2 clip finished");
+                    playbackEnded = true;
+                }
+                else if (FAILED(status))
+                {
+                    BootLog("CPU MPEG-2 playback failed", status);
+                    playbackEnded = true;
+                    showFrame = false;
+                }
+            }
             animation.Update(elapsed);
             device->Clear(0, NULL, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            bool drewVideo = false;
             if (SUCCEEDED(device->BeginScene()))
             {
                 if (showFrame)
-                    frame.Draw(device, present.BackBufferWidth, present.BackBufferHeight);
+                {
+                    drewVideo = SUCCEEDED(frame.Draw(device, present.BackBufferWidth,
+                                                    present.BackBufferHeight));
+                }
                 else
                     animation.Render();
                 device->EndScene();
             }
-            device->Present(NULL, NULL, NULL, NULL);
+            const HRESULT presentStatus = device->Present(NULL, NULL, NULL, NULL);
+            bool report = playbackEnded;
+            if (compressed && drewVideo && SUCCEEDED(presentStatus) &&
+                lastPresented != frame.FramesReady())
+            {
+                lastPresented = frame.FramesReady();
+                ++presentedFrames;
+                report = report || presentedFrames % 120 == 0;
+            }
+            if (report)
+            {
+                char stats[144];
+                sprintf_s(stats, sizeof(stats),
+                          "MPEG-2 pacing: ready=%u presented=%u missed=%u late>=frame=%u maxLate=%.2fms",
+                          frame.FramesReady(), presentedFrames, missedFrames,
+                          frame.LateByFrame(), frame.MaxLateSeconds() * 1000.0);
+                BootLog(stats);
+            }
         }
 
         animation.Shutdown();

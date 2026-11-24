@@ -30,12 +30,15 @@ namespace
     HRESULT UploadPlane(IDirect3DDevice9* device, const BYTE* data, unsigned stride,
                         unsigned width, unsigned height, IDirect3DTexture9** texture)
     {
-        HRESULT hr = device->CreateTexture(width, height, 1, 0, D3DFMT_LIN_L8,
-                                          D3DPOOL_DEFAULT, texture, NULL);
-        if (FAILED(hr))
-            return hr;
+        if (!*texture)
+        {
+            HRESULT hr = device->CreateTexture(width, height, 1, 0, D3DFMT_LIN_L8,
+                                               D3DPOOL_DEFAULT, texture, NULL);
+            if (FAILED(hr))
+                return hr;
+        }
         D3DLOCKED_RECT lock;
-        hr = (*texture)->LockRect(0, &lock, NULL, 0);
+        HRESULT hr = (*texture)->LockRect(0, &lock, NULL, 0);
         if (FAILED(hr))
             return hr;
         bool ok = lock.Pitch >= (int)width;
@@ -46,7 +49,20 @@ namespace
     }
 }
 
-DvdFrameProbe::DvdFrameProbe() : m_vs(NULL), m_ps(NULL), m_decl(NULL)
+struct DvdFrameProbe::Decoder
+{
+    FILE* file;
+    mpeg2dec_t* handle;
+    BYTE input[8192];
+    BYTE end[8];
+    bool flushed;
+    double duration;
+};
+
+DvdFrameProbe::DvdFrameProbe()
+    : m_decoder(NULL), m_width(0), m_height(0), m_untilNext(0),
+      m_framesReady(0), m_lateByFrame(0), m_maxLate(0),
+      m_vs(NULL), m_ps(NULL), m_decl(NULL)
 {
     for (unsigned i = 0; i < 3; ++i)
         m_planes[i] = NULL;
@@ -54,6 +70,12 @@ DvdFrameProbe::DvdFrameProbe() : m_vs(NULL), m_ps(NULL), m_decl(NULL)
 
 DvdFrameProbe::~DvdFrameProbe()
 {
+    if (m_decoder)
+    {
+        if (m_decoder->handle) mpeg2_close(m_decoder->handle);
+        fclose(m_decoder->file);
+        delete m_decoder;
+    }
     for (unsigned i = 0; i < 3; ++i)
         if (m_planes[i]) m_planes[i]->Release();
     if (m_decl) m_decl->Release();
@@ -80,36 +102,80 @@ HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
 
 HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
 {
-    // Use the portable C backend first; no XAV or VMX assumptions.
-    mpeg2_accel(0);
-    mpeg2dec_t* decoder = mpeg2_init();
-    if (!decoder)
+    // Takes ownership of the input file, even when startup fails.
+    m_decoder = new Decoder();
+    if (!m_decoder)
+    {
+        fclose(file);
         return E_OUTOFMEMORY;
+    }
+    m_decoder->file = file;
+    mpeg2_accel(0);
+    m_decoder->handle = mpeg2_init();
+    if (!m_decoder->handle)
+        return E_OUTOFMEMORY;
+    const BYTE end[] = {0, 0, 1, 0xB7, 0, 0, 1, 0xB7};
+    memcpy(m_decoder->end, end, sizeof(end));
+    HRESULT hr = NextFrame(device);
+    m_untilNext = m_decoder->duration;
+    if (hr == S_OK)
+        ++m_framesReady;
+    return hr == S_FALSE ? E_FAIL : hr;
+}
+
+HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed)
+{
+    if (!m_decoder)
+        return S_OK;
+    m_untilNext -= elapsed;
+    if (m_untilNext > 0)
+        return S_OK;
+    HRESULT hr = NextFrame(device);
+    if (hr == S_OK)
+    {
+        ++m_framesReady;
+        const double late = -m_untilNext;
+        if (late > m_maxLate)
+            m_maxLate = late;
+        if (late >= m_decoder->duration)
+            ++m_lateByFrame;
+        m_untilNext += m_decoder->duration;
+        if (m_untilNext < 0)
+            m_untilNext = 0;
+    }
+    else
+    {
+        mpeg2_close(m_decoder->handle);
+        fclose(m_decoder->file);
+        delete m_decoder;
+        m_decoder = NULL;
+    }
+    return hr;
+}
+
+HRESULT DvdFrameProbe::NextFrame(IDirect3DDevice9* device)
+{
+    Decoder& stream = *m_decoder;
+    mpeg2dec_t* decoder = stream.handle;
     const mpeg2_info_t* info = mpeg2_info(decoder);
-    BYTE input[8192];
-    BYTE end[] = {0, 0, 1, 0xB7, 0, 0, 1, 0xB7};
-    bool flushed = false;
-    unsigned remaining = 2 * 1024 * 1024;
-    HRESULT hr = E_FAIL;
     for (unsigned steps = 0; steps < 8192; ++steps)
     {
         const mpeg2_state_t state = mpeg2_parse(decoder);
         if (state == STATE_BUFFER)
         {
-            if (flushed || !remaining)
-                break;
-            const size_t size = fread(input, 1, remaining < sizeof(input) ? remaining : sizeof(input), file);
-            if (ferror(file))
-                break;
+            if (stream.flushed)
+                return S_FALSE;
+            const size_t size = fread(stream.input, 1, sizeof(stream.input), stream.file);
+            if (ferror(stream.file))
+                return E_FAIL;
             if (size)
             {
-                remaining -= size;
-                mpeg2_buffer(decoder, input, input + size);
+                mpeg2_buffer(decoder, stream.input, stream.input + size);
             }
             else
             {
-                flushed = true;
-                mpeg2_buffer(decoder, end, end + sizeof(end));
+                stream.flushed = true;
+                mpeg2_buffer(decoder, stream.end, stream.end + sizeof(stream.end));
             }
         }
         else if (state == STATE_SEQUENCE || state == STATE_SEQUENCE_REPEATED ||
@@ -120,8 +186,7 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
                 seq->width > 720 || seq->height > 576 ||
                 seq->chroma_width * 2 != seq->width || seq->chroma_height * 2 != seq->height)
             {
-                hr = E_INVALIDARG;
-                break;
+                return E_INVALIDARG;
             }
         }
         else if ((state == STATE_SLICE || state == STATE_END) &&
@@ -131,17 +196,23 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
             const BYTE* planes[] = {info->display_fbuf->buf[0],
                                     info->display_fbuf->buf[1],
                                     info->display_fbuf->buf[2]};
-            hr = LoadPlanes(device, seq->picture_width, seq->picture_height, planes, seq->width);
-            break;
+            // libmpeg2 frame periods use a 27 MHz clock; nb_fields includes repeats.
+            stream.duration = seq->frame_period && info->display_picture->nb_fields
+                ? seq->frame_period * (double)info->display_picture->nb_fields / 54000000.0
+                : 1.0 / 25.0;
+            return LoadPlanes(device, seq->picture_width, seq->picture_height, planes, seq->width);
         }
     }
-    mpeg2_close(decoder);
-    return hr;
+    return E_FAIL;
 }
 
 HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsigned height,
                                   const BYTE* const planes[3], unsigned stride)
 {
+    if (m_width && (width != m_width || height != m_height))
+        return E_INVALIDARG;
+    if (m_decl)
+        device->BlockUntilIdle(); // The preceding draw may still sample these textures.
     for (unsigned i = 0; i < 3; ++i)
     {
         HRESULT hr = UploadPlane(device, planes[i], i ? stride / 2 : stride,
@@ -150,6 +221,10 @@ HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsi
         if (FAILED(hr))
             return hr;
     }
+    m_width = width;
+    m_height = height;
+    if (m_decl)
+        return S_OK;
     ID3DXBuffer* code = NULL;
     HRESULT hr = D3DXCompileShader(kVs, (UINT)strlen(kVs), NULL, NULL, "main",
                                    "vs_3_0", 0, &code, NULL, NULL);
@@ -175,7 +250,7 @@ HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsi
     return device->CreateVertexDeclaration(elements, &m_decl);
 }
 
-void DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const
+HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const
 {
     // The smoke-test fixture is displayed as 4:3, independent of coded size.
     const float aspect = (float)width / height;
@@ -199,5 +274,5 @@ void DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned heig
         device->SetSamplerState(i, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
         device->SetSamplerState(i, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
     }
-    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(vertices[0]));
+    return device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(vertices[0]));
 }

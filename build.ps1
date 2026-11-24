@@ -69,6 +69,38 @@ if ([regex]::Matches($deviceText, [regex]::Escape($oldStreamIoctls)).Count -ne 1
 $null = New-Item -ItemType Directory -Force (Split-Path $deviceSource)
 [IO.File]::WriteAllText($deviceSource,
     $deviceText.Replace($oldSeek, $newSeek).Replace($oldStreamIoctls, $newStreamIoctls))
+
+# Keep libmpeg2's row transform, scan layout, clipping and DC shortcut.
+$idctText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'deps\libmpeg2\libmpeg2\idct.c'))
+$columnLoop = 'for \(i = 0; i < 8; i\+\+\)\s+idct_col \(block \+ i\);'
+if ([regex]::Matches($idctText, $columnLoop).Count -ne 2) {
+    throw 'Recheck the Xbox IDCT column hook against the pinned source.'
+}
+$idctText = [regex]::Replace($idctText, $columnLoop, 'dvd360_idct_columns(block); i = 8;')
+$columnHook = @'
+void (*dvd360_idct_columns_vmx)(int16_t *);
+
+void dvd360_idct_columns_scalar(int16_t *block)
+{
+    for (int i = 0; i < 8; ++i)
+        idct_col(block + i);
+}
+
+static void dvd360_idct_columns(int16_t *block)
+{
+    if (dvd360_idct_columns_vmx && !((uintptr_t)block & 15))
+        dvd360_idct_columns_vmx(block);
+    else
+        dvd360_idct_columns_scalar(block);
+}
+
+'@
+$anchor = 'static void mpeg2_idct_copy_c'
+if ([regex]::Matches($idctText, $anchor).Count -ne 1) {
+    throw 'Recheck the Xbox IDCT column hook insertion point.'
+}
+[IO.File]::WriteAllText((Join-Path (Split-Path $deviceSource) 'idct_xbox360.c'),
+    $idctText.Replace($anchor, $columnHook + "`n" + $anchor))
 & $MSBuild $libraryProject /t:ClCompile /nologo /v:minimal `
     '/p:Configuration=Release' '/p:Platform=Xbox 360' `
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `

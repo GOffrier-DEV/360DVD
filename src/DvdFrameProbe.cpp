@@ -8,6 +8,12 @@
 
 extern "C" {
 #include "../deps/libmpeg2/include/mpeg2.h"
+int dvd360_mpeg2_enable_vmx(void);
+int dvd360_mpeg2_enable_vmx_dc(void);
+int dvd360_mpeg2_enable_vmx_idct(void);
+unsigned dvd360_mpeg2_vmx_blocks(void);
+unsigned dvd360_mpeg2_vmx_dc_blocks(void);
+unsigned dvd360_mpeg2_vmx_idct_blocks(void);
 }
 
 namespace
@@ -49,6 +55,16 @@ namespace
     }
 }
 
+struct DvdFrameProbe::QueuedFrame
+{
+    BYTE pixels[kWidth * kHeight * 3 / 2];
+    unsigned width, height, calls;
+    unsigned motion, dc, idct;
+    double duration;
+    LONGLONG parseTicks, readTicks;
+    HRESULT status;
+};
+
 struct DvdFrameProbe::Decoder
 {
     FILE* file;
@@ -56,31 +72,114 @@ struct DvdFrameProbe::Decoder
     BYTE input[8192];
     BYTE end[8];
     bool flushed;
-    double duration;
+    HANDLE thread, stop, freeSlots, ready;
+    unsigned writeIndex, readIndex, calls;
+    LONGLONG parseTicks, readTicks;
+    QueuedFrame queue[3];
 };
 
 DvdFrameProbe::DvdFrameProbe()
     : m_decoder(NULL), m_width(0), m_height(0), m_untilNext(0),
       m_framesReady(0), m_lateByFrame(0), m_maxLate(0),
+      m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
+      m_readTicks(0), m_uploadTicks(0), m_gpuWaitTicks(0),
+      m_underruns(0), m_textureSet(0),
+      m_motionBlocks(0), m_dcBlocks(0), m_idctBlocks(0),
       m_vs(NULL), m_ps(NULL), m_decl(NULL)
 {
-    for (unsigned i = 0; i < 3; ++i)
-        m_planes[i] = NULL;
+    memset(m_planes, 0, sizeof(m_planes));
 }
 
 DvdFrameProbe::~DvdFrameProbe()
 {
-    if (m_decoder)
-    {
-        if (m_decoder->handle) mpeg2_close(m_decoder->handle);
-        fclose(m_decoder->file);
-        delete m_decoder;
-    }
-    for (unsigned i = 0; i < 3; ++i)
-        if (m_planes[i]) m_planes[i]->Release();
+    CloseDecoder();
+    for (unsigned set = 0; set < 3; ++set)
+        for (unsigned i = 0; i < 3; ++i)
+            if (m_planes[set][i]) m_planes[set][i]->Release();
     if (m_decl) m_decl->Release();
     if (m_ps) m_ps->Release();
     if (m_vs) m_vs->Release();
+}
+
+void DvdFrameProbe::CloseDecoder()
+{
+    if (!m_decoder)
+        return;
+    Decoder& d = *m_decoder;
+    if (d.thread)
+    {
+        SetEvent(d.stop);
+        WaitForSingleObject(d.thread, INFINITE);
+        CloseHandle(d.thread);
+    }
+    if (d.ready) CloseHandle(d.ready);
+    if (d.freeSlots) CloseHandle(d.freeSlots);
+    if (d.stop) CloseHandle(d.stop);
+    if (d.handle) mpeg2_close(d.handle);
+    fclose(d.file);
+    delete m_decoder;
+    m_decoder = NULL;
+}
+
+DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
+{
+    DvdFrameProbe& player = *static_cast<DvdFrameProbe*>(context);
+    Decoder& d = *player.m_decoder;
+    HANDLE wait[] = {d.stop, d.freeSlots};
+    while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+    {
+        QueuedFrame& frame = d.queue[d.writeIndex];
+        const HRESULT status = player.NextFrame(frame);
+        frame.status = status;
+        frame.calls = d.calls;
+        frame.parseTicks = d.parseTicks;
+        frame.readTicks = d.readTicks;
+        frame.motion = dvd360_mpeg2_vmx_blocks();
+        frame.dc = dvd360_mpeg2_vmx_dc_blocks();
+        frame.idct = dvd360_mpeg2_vmx_idct_blocks();
+        d.writeIndex = (d.writeIndex + 1) % 3;
+        ReleaseSemaphore(d.ready, 1, NULL);
+        if (status != S_OK)
+            break;
+    }
+    return 0;
+}
+
+HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
+{
+    Decoder& d = *m_decoder;
+    const DWORD wait = WaitForSingleObject(d.ready, timeout);
+    if (wait == WAIT_TIMEOUT)
+        return E_PENDING;
+    if (wait != WAIT_OBJECT_0)
+        return E_FAIL;
+    QueuedFrame& frame = d.queue[d.readIndex];
+    m_parseCalls = frame.calls;
+    m_parseTicks = frame.parseTicks;
+    m_readTicks = frame.readTicks;
+    m_motionBlocks = frame.motion;
+    m_dcBlocks = frame.dc;
+    m_idctBlocks = frame.idct;
+    HRESULT hr = frame.status;
+    if (hr == S_OK)
+    {
+        const unsigned luma = frame.width * frame.height;
+        const unsigned chroma = ((frame.width + 1) / 2) * ((frame.height + 1) / 2);
+        const BYTE* planes[] = {frame.pixels, frame.pixels + luma, frame.pixels + luma + chroma};
+        hr = LoadPlanes(device, frame.width, frame.height, planes, frame.width);
+        if (SUCCEEDED(hr))
+        {
+            ++m_framesReady;
+            const double late = -m_untilNext;
+            if (late > m_maxLate) m_maxLate = late;
+            if (late >= frame.duration) ++m_lateByFrame;
+            m_untilNext += frame.duration;
+            if (m_untilNext < 0) m_untilNext = 0;
+        }
+    }
+    d.readIndex = (d.readIndex + 1) % 3;
+    ReleaseSemaphore(d.freeSlots, 1, NULL);
+    return hr;
 }
 
 HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
@@ -102,6 +201,9 @@ HRESULT DvdFrameProbe::Load(IDirect3DDevice9* device, FILE* file)
 
 HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
 {
+    LARGE_INTEGER frequency;
+    if (QueryPerformanceFrequency(&frequency))
+        m_parseFrequency = frequency.QuadPart;
     // Takes ownership of the input file, even when startup fails.
     m_decoder = new Decoder();
     if (!m_decoder)
@@ -113,13 +215,44 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, FILE* file)
     mpeg2_accel(0);
     m_decoder->handle = mpeg2_init();
     if (!m_decoder->handle)
+    {
+        CloseDecoder();
         return E_OUTOFMEMORY;
+    }
+    FILE* vmx = fopen("game:\\mpeg2-vmx.enable", "rb");
+    if (vmx)
+    {
+        fclose(vmx);
+        OutputDebugStringA(dvd360_mpeg2_enable_vmx()
+            ? "MPEG-2 VMX motion compensation enabled\r\n"
+            : "MPEG-2 VMX self-test failed; using scalar\r\n");
+    }
+    FILE* dc = fopen("game:\\mpeg2-vmx-dc.enable", "rb");
+    if (dc)
+    {
+        fclose(dc);
+        OutputDebugStringA(dvd360_mpeg2_enable_vmx_dc()
+            ? "MPEG-2 VMX DC reconstruction enabled\r\n"
+            : "MPEG-2 VMX DC self-test failed; using scalar\r\n");
+    }
+    FILE* idct = fopen("game:\\mpeg2-vmx-idct.enable", "rb");
+    if (idct)
+    {
+        fclose(idct);
+        OutputDebugStringA(dvd360_mpeg2_enable_vmx_idct()
+            ? "MPEG-2 VMX IDCT columns enabled\r\n"
+            : "MPEG-2 VMX IDCT self-test failed; using scalar\r\n");
+    }
     const BYTE end[] = {0, 0, 1, 0xB7, 0, 0, 1, 0xB7};
     memcpy(m_decoder->end, end, sizeof(end));
-    HRESULT hr = NextFrame(device);
-    m_untilNext = m_decoder->duration;
-    if (hr == S_OK)
-        ++m_framesReady;
+    m_decoder->stop = CreateEvent(NULL, TRUE, FALSE, NULL);
+    m_decoder->freeSlots = CreateSemaphore(NULL, 3, 3, NULL);
+    m_decoder->ready = CreateSemaphore(NULL, 0, 3, NULL);
+    if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready)
+        m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
+    HRESULT hr = m_decoder->thread ? Consume(device, INFINITE) : E_FAIL;
+    if (hr != S_OK)
+        CloseDecoder();
     return hr == S_FALSE ? E_FAIL : hr;
 }
 
@@ -130,42 +263,50 @@ HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed)
     m_untilNext -= elapsed;
     if (m_untilNext > 0)
         return S_OK;
-    HRESULT hr = NextFrame(device);
-    if (hr == S_OK)
+    const HRESULT hr = Consume(device, 0);
+    if (hr == E_PENDING)
     {
-        ++m_framesReady;
-        const double late = -m_untilNext;
-        if (late > m_maxLate)
-            m_maxLate = late;
-        if (late >= m_decoder->duration)
-            ++m_lateByFrame;
-        m_untilNext += m_decoder->duration;
-        if (m_untilNext < 0)
-            m_untilNext = 0;
+        ++m_underruns;
+        return S_OK; // Hold the previous frame and retry at the next refresh.
     }
-    else
-    {
-        mpeg2_close(m_decoder->handle);
-        fclose(m_decoder->file);
-        delete m_decoder;
-        m_decoder = NULL;
-    }
+    if (hr != S_OK)
+        CloseDecoder();
     return hr;
 }
 
-HRESULT DvdFrameProbe::NextFrame(IDirect3DDevice9* device)
+double DvdFrameProbe::ParseMilliseconds() const
+{
+    return m_parseFrequency ? m_parseTicks * 1000.0 / m_parseFrequency : 0.0;
+}
+
+double DvdFrameProbe::ReadMilliseconds() const
+{ return m_parseFrequency ? m_readTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::UploadMilliseconds() const
+{ return m_parseFrequency ? m_uploadTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::GpuWaitMilliseconds() const
+{ return m_parseFrequency ? m_gpuWaitTicks * 1000.0 / m_parseFrequency : 0.0; }
+
+HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
 {
     Decoder& stream = *m_decoder;
     mpeg2dec_t* decoder = stream.handle;
     const mpeg2_info_t* info = mpeg2_info(decoder);
     for (unsigned steps = 0; steps < 8192; ++steps)
     {
+        LARGE_INTEGER start, finish;
+        QueryPerformanceCounter(&start);
         const mpeg2_state_t state = mpeg2_parse(decoder);
+        QueryPerformanceCounter(&finish);
+        stream.parseTicks += finish.QuadPart - start.QuadPart;
+        ++stream.calls;
         if (state == STATE_BUFFER)
         {
             if (stream.flushed)
                 return S_FALSE;
+            QueryPerformanceCounter(&start);
             const size_t size = fread(stream.input, 1, sizeof(stream.input), stream.file);
+            QueryPerformanceCounter(&finish);
+            stream.readTicks += finish.QuadPart - start.QuadPart;
             if (ferror(stream.file))
                 return E_FAIL;
             if (size)
@@ -197,10 +338,21 @@ HRESULT DvdFrameProbe::NextFrame(IDirect3DDevice9* device)
                                     info->display_fbuf->buf[1],
                                     info->display_fbuf->buf[2]};
             // libmpeg2 frame periods use a 27 MHz clock; nb_fields includes repeats.
-            stream.duration = seq->frame_period && info->display_picture->nb_fields
+            frame.duration = seq->frame_period && info->display_picture->nb_fields
                 ? seq->frame_period * (double)info->display_picture->nb_fields / 54000000.0
                 : 1.0 / 25.0;
-            return LoadPlanes(device, seq->picture_width, seq->picture_height, planes, seq->width);
+            frame.width = seq->picture_width;
+            frame.height = seq->picture_height;
+            BYTE* dest = frame.pixels;
+            for (unsigned i = 0; i < 3; ++i)
+            {
+                const unsigned width = i ? (frame.width + 1) / 2 : frame.width;
+                const unsigned height = i ? (frame.height + 1) / 2 : frame.height;
+                const unsigned stride = i ? seq->chroma_width : seq->width;
+                for (unsigned row = 0; row < height; ++row, dest += width)
+                    memcpy(dest, planes[i] + row * stride, width);
+            }
+            return S_OK;
         }
     }
     return E_FAIL;
@@ -211,16 +363,25 @@ HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsi
 {
     if (m_width && (width != m_width || height != m_height))
         return E_INVALIDARG;
-    if (m_decl)
-        device->BlockUntilIdle(); // The preceding draw may still sample these textures.
+    const unsigned next = m_decl ? (m_textureSet + 1) % 3 : 0;
+    LARGE_INTEGER start, waited, finish;
+    QueryPerformanceCounter(&start);
+    for (unsigned i = 0; i < 3; ++i)
+        if (m_planes[next][i])
+            m_planes[next][i]->BlockUntilNotBusy();
+    QueryPerformanceCounter(&waited);
+    m_gpuWaitTicks += waited.QuadPart - start.QuadPart;
     for (unsigned i = 0; i < 3; ++i)
     {
-        HRESULT hr = UploadPlane(device, planes[i], i ? stride / 2 : stride,
+        HRESULT hr = UploadPlane(device, planes[i], i ? (stride + 1) / 2 : stride,
                                   i ? (width + 1) / 2 : width,
-                                  i ? (height + 1) / 2 : height, &m_planes[i]);
+                                  i ? (height + 1) / 2 : height, &m_planes[next][i]);
         if (FAILED(hr))
             return hr;
     }
+    QueryPerformanceCounter(&finish);
+    m_uploadTicks += finish.QuadPart - waited.QuadPart;
+    m_textureSet = next;
     m_width = width;
     m_height = height;
     if (m_decl)
@@ -268,7 +429,7 @@ HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned h
     device->SetPixelShader(m_ps);
     for (unsigned i = 0; i < 3; ++i)
     {
-        device->SetTexture(i, m_planes[i]);
+        device->SetTexture(i, m_planes[m_textureSet][i]);
         device->SetSamplerState(i, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
         device->SetSamplerState(i, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         device->SetSamplerState(i, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);

@@ -63,12 +63,17 @@
     <ClCompile Include="deps\libdvdcss\src\libdvdcpxm.c" />
     <ClCompile Include="deps\libdvdcss\src\libdvdcss.c" />
     <ClCompile Include="port\xbox360\dvdcss_ioctl.c" />
+    <ClCompile Include="port\xbox360\mpeg2_vmx.c">
+      <AdditionalOptions>-maltivec %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="deps\libmpeg2\libmpeg2\alloc.c" />
     <ClCompile Include="deps\libmpeg2\libmpeg2\cpu_accel.c" />
     <ClCompile Include="deps\libmpeg2\libmpeg2\cpu_state.c" />
     <ClCompile Include="deps\libmpeg2\libmpeg2\decode.c" />
     <ClCompile Include="deps\libmpeg2\libmpeg2\header.c" />
-    <ClCompile Include="deps\libmpeg2\libmpeg2\idct.c" />
+    <ClCompile Include="build\obj\libs\idct_xbox360.c">
+      <AdditionalIncludeDirectories>deps\libmpeg2\libmpeg2;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="deps\libmpeg2\libmpeg2\motion_comp.c" />
     <ClCompile Include="deps\libmpeg2\libmpeg2\slice.c" />
   </ItemGroup>

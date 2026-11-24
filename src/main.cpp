@@ -230,6 +230,54 @@ namespace
         return 0;
     }
 
+    // Capture numeric samples only during playback. Format and write at EOF.
+    struct PacingSample
+    {
+        unsigned frame, presented, missed, underruns;
+        float interval, advance, draw, present;
+        double parse, read, upload, gpuWait;
+        unsigned int advanceStatus, presentStatus;
+        bool drewVideo;
+    };
+
+    PacingSample pacingTrace[16384];
+
+    void WritePacingTrace(unsigned count, unsigned omitted)
+    {
+        FILE* file = fopen("game:\\360DVD-pacing.csv", "wb");
+        if (!file)
+        {
+            BootLog("Could not open 360DVD-pacing.csv", E_FAIL);
+            return;
+        }
+        static char buffer[16384];
+        setvbuf(file, buffer, _IOFBF, sizeof(buffer));
+        fprintf(file, "refresh,ready,presented,missed,underruns,interval_ms,advance_ms,"
+                      "draw_ms,present_ms,parse_ms,read_ms,upload_ms,gpu_wait_ms,"
+                      "advance_status,present_status,drew_video\n");
+        double priorParse = 0, priorRead = 0, priorUpload = 0, priorWait = 0;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const PacingSample& s = pacingTrace[i];
+            fprintf(file, "%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,"
+                          "%.3f,%.3f,%.3f,%.3f,%08X,%08X,%u\n",
+                    i + 1, s.frame, s.presented, s.missed, s.underruns,
+                    s.interval, s.advance, s.draw, s.present,
+                    s.parse - priorParse, s.read - priorRead,
+                    s.upload - priorUpload, s.gpuWait - priorWait,
+                    s.advanceStatus, s.presentStatus, (unsigned)s.drewVideo);
+            priorParse = s.parse;
+            priorRead = s.read;
+            priorUpload = s.upload;
+            priorWait = s.gpuWait;
+        }
+        const bool writeFailed = ferror(file) != 0;
+        const int closeStatus = fclose(file);
+        char result[96];
+        sprintf_s(result, sizeof(result), "MPEG-2 trace: refreshes=%u omitted=%u", count, omitted);
+        BootLog(result, writeFailed || closeStatus ? E_FAIL : S_OK);
+    }
+
     int Run()
     {
         BootLog("360DVD boot");
@@ -323,6 +371,11 @@ namespace
         unsigned presentedFrames = 0;
         unsigned lastPresented = 0;
         unsigned missedFrames = 0;
+        LONGLONG presentTicks = 0;
+        unsigned traceCount = 0, traceOmitted = 0;
+        bool capture = showFrame && compressed;
+        bool playbackClockStarted = false;
+        const double ticksToMs = 1000.0 / frequency.QuadPart;
 
         for (;;)
         {
@@ -333,24 +386,26 @@ namespace
             previous = now;
 
             bool playbackEnded = false;
-            if (showFrame && compressed)
+            HRESULT advanceStatus = S_OK;
+            if (showFrame && compressed && playbackClockStarted)
             {
                 const unsigned before = frame.FramesReady();
                 const HRESULT status = frame.Advance(device, elapsed);
+                advanceStatus = status;
                 if (frame.FramesReady() != before && lastPresented != before)
                     ++missedFrames;
                 if (status == S_FALSE)
                 {
-                    BootLog("CPU MPEG-2 clip finished");
                     playbackEnded = true;
                 }
                 else if (FAILED(status))
                 {
-                    BootLog("CPU MPEG-2 playback failed", status);
                     playbackEnded = true;
                     showFrame = false;
                 }
             }
+            LARGE_INTEGER advanceEnd;
+            QueryPerformanceCounter(&advanceEnd);
             animation.Update(elapsed);
             device->Clear(0, NULL, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
             bool drewVideo = false;
@@ -365,22 +420,70 @@ namespace
                     animation.Render();
                 device->EndScene();
             }
+            LARGE_INTEGER presentStart, presentEnd;
+            QueryPerformanceCounter(&presentStart);
             const HRESULT presentStatus = device->Present(NULL, NULL, NULL, NULL);
-            bool report = playbackEnded;
+            QueryPerformanceCounter(&presentEnd);
+            presentTicks += presentEnd.QuadPart - presentStart.QuadPart;
+            if (compressed && drewVideo && SUCCEEDED(presentStatus) && !playbackClockStarted)
+            {
+                // Keep startup Present in the trace, but out of the video timeline.
+                previous = presentEnd;
+                playbackClockStarted = true;
+            }
             if (compressed && drewVideo && SUCCEEDED(presentStatus) &&
                 lastPresented != frame.FramesReady())
             {
                 lastPresented = frame.FramesReady();
                 ++presentedFrames;
-                report = report || presentedFrames % 120 == 0;
             }
-            if (report)
+            if (capture)
             {
-                char stats[144];
+                if (traceCount < sizeof(pacingTrace) / sizeof(pacingTrace[0]))
+                {
+                    PacingSample& s = pacingTrace[traceCount++];
+                    s.frame = frame.FramesReady();
+                    s.presented = presentedFrames;
+                    s.missed = missedFrames;
+                    s.underruns = frame.Underruns();
+                    s.interval = elapsed * 1000.0f;
+                    s.advance = (float)((advanceEnd.QuadPart - now.QuadPart) * ticksToMs);
+                    s.draw = (float)((presentStart.QuadPart - advanceEnd.QuadPart) * ticksToMs);
+                    s.present = (float)((presentEnd.QuadPart - presentStart.QuadPart) * ticksToMs);
+                    s.parse = frame.ParseMilliseconds();
+                    s.read = frame.ReadMilliseconds();
+                    s.upload = frame.UploadMilliseconds();
+                    s.gpuWait = frame.GpuWaitMilliseconds();
+                    s.advanceStatus = (unsigned)advanceStatus;
+                    s.presentStatus = (unsigned)presentStatus;
+                    s.drewVideo = drewVideo;
+                }
+                else
+                    ++traceOmitted;
+            }
+            if (playbackEnded)
+            {
+                capture = false;
+                WritePacingTrace(traceCount, traceOmitted);
+                BootLog(FAILED(advanceStatus) ? "CPU MPEG-2 playback failed" :
+                        "CPU MPEG-2 clip finished", FAILED(advanceStatus) ? advanceStatus : S_OK);
+                char stats[160];
                 sprintf_s(stats, sizeof(stats),
-                          "MPEG-2 pacing: ready=%u presented=%u missed=%u late>=frame=%u maxLate=%.2fms",
+                          "MPEG-2 pacing: ready=%u presented=%u missed=%u late>=frame=%u maxLate=%.2fms vmx=%u dc=%u idct=%u",
                           frame.FramesReady(), presentedFrames, missedFrames,
-                          frame.LateByFrame(), frame.MaxLateSeconds() * 1000.0);
+                          frame.LateByFrame(), frame.MaxLateSeconds() * 1000.0,
+                          frame.MotionBlocks(), frame.DcBlocks(), frame.IdctBlocks());
+                BootLog(stats);
+                sprintf_s(stats, sizeof(stats),
+                          "MPEG-2 queue: underruns=%u read=%.2fms upload=%.2fms gpuWait=%.2fms present=%.2fms",
+                          frame.Underruns(), frame.ReadMilliseconds(), frame.UploadMilliseconds(),
+                          frame.GpuWaitMilliseconds(), presentTicks * 1000.0 / frequency.QuadPart);
+                BootLog(stats);
+                const double parseMs = frame.ParseMilliseconds();
+                sprintf_s(stats, sizeof(stats),
+                          "MPEG-2 parse: calls=%u total=%.2fms avg/frame=%.3fms",
+                          frame.ParseCalls(), parseMs,
+                          frame.FramesReady() ? parseMs / frame.FramesReady() : 0.0);
                 BootLog(stats);
             }
         }

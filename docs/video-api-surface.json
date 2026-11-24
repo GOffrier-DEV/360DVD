@@ -1,0 +1,105 @@
+{
+  "description": "Required declared API surface, not a hardware capability certification.",
+  "groups": {
+    "raster_probe": {
+      "d3d9.h": [
+        "Direct3D::CreateDevice",
+        "Direct3D::CheckDeviceFormat",
+        "D3DDevice::CreateTexture",
+        "D3DDevice::CreateRenderTarget",
+        "D3DDevice::CreateVertexDeclaration",
+        "D3DDevice::CreateVertexShader",
+        "D3DDevice::CreatePixelShader",
+        "D3DDevice::SetRenderTarget",
+        "D3DDevice::SetDepthStencilSurface",
+        "D3DDevice::SetViewport",
+        "D3DDevice::SetVertexDeclaration",
+        "D3DDevice::SetVertexShader",
+        "D3DDevice::SetPixelShader",
+        "D3DDevice::SetPixelShaderConstantF",
+        "D3DDevice::SetTexture",
+        "D3DDevice::SetSamplerState",
+        "D3DDevice::SetRenderState",
+        "D3DDevice::DrawPrimitiveUP",
+        "D3DDevice::Resolve",
+        "D3DDevice::InsertFence",
+        "D3DDevice::IsFencePending",
+        "D3DDevice::BlockOnFence",
+        "D3DTexture::GetLevelDesc",
+        "D3DBaseTexture::GetLevelCount",
+        "D3DTexture::LockRect",
+        "D3DTexture::UnlockRect"
+      ],
+      "d3d9types.h": [
+        "D3DFMT_A8R8G8B8",
+        "D3DFMT_LIN_A8R8G8B8",
+        "D3DFMT_L8",
+        "D3DFMT_LIN_L8",
+        "D3DFMT_A32B32G32R32F",
+        "D3DRESOLVE_RENDERTARGET0",
+        "D3DSAMP_MINFILTER",
+        "D3DSAMP_MAGFILTER",
+        "D3DSAMP_MIPFILTER",
+        "D3DSAMP_ADDRESSU",
+        "D3DSAMP_ADDRESSV",
+        "D3DTEXF_POINT",
+        "D3DTEXF_NONE",
+        "D3DTADDRESS_CLAMP",
+        "D3DRS_ALPHABLENDENABLE",
+        "D3DRS_ZENABLE",
+        "D3DRS_STENCILENABLE",
+        "D3DRS_ALPHATESTENABLE",
+        "D3DRS_ALPHATOMASKENABLE",
+        "D3DRS_HALFPIXELOFFSET",
+        "D3DRS_COLORWRITEENABLE",
+        "D3DLOCK_READONLY"
+      ]
+    },
+    "resource_layout": {
+      "xgraphics.h": [
+        "XGGetTextureDesc",
+        "XGGetTextureLayout",
+        "XGGetMipLevelOffset",
+        "XGTileSurface",
+        "XGUntileSurface",
+        "XGEndianSwapSurface",
+        "XGSetTextureHeader",
+        "XGAddress2DTiledExtent",
+        "XGTDESC_TILED",
+        "XGTDESC_BORDERED"
+      ],
+      "d3d9gpu.h": [
+        "GPU_CONVERT_CPU_TO_GPU_ADDRESS"
+      ]
+    },
+    "later_memexport_experiment": {
+      "d3d9.h": [
+        "D3DDevice::BeginExport",
+        "D3DDevice::EndExport",
+        "D3DDevice::InsertBlockOnAsyncResources",
+        "D3DDevice::SignalAsyncResources",
+        "D3DDevice::InvalidateResourceGpuCache"
+      ],
+      "d3d9types.h": [
+        "D3DBEGINEXPORT_VERTEXSHADER",
+        "D3DBEGINEXPORT_PIXELSHADER"
+      ],
+      "d3d9gpu.h": [
+        "GPU_MEMEXPORT_STREAM_CONSTANT",
+        "GPU_SET_MEMEXPORT_STREAM_CONSTANT"
+      ]
+    }
+  },
+  "desktop_assumptions_absent": {
+    "d3d9.h": [
+      "D3DDevice::StretchRect",
+      "D3DDevice::GetRenderTargetData"
+    ],
+    "d3d9types.h": [
+      "D3DRS_DITHERENABLE",
+      "D3DRS_SRGBWRITEENABLE",
+      "D3DSAMP_SRGBTEXTURE",
+      "D3DLOCK_DISCARD"
+    ]
+  }
+}

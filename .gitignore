@@ -1,0 +1,9 @@
+/build/
+/deps/build/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.xex

@@ -105,6 +105,7 @@
     <ClCompile Include="src\main.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
+    <ClCompile Include="src\DvdFrameProbe.cpp" />
     <ClCompile Include="src\DvdLogoBounce.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
@@ -114,6 +115,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\DvdLogoBounce.h" />
+    <ClInclude Include="src\DvdFrameProbe.h" />
     <ClInclude Include="src\XboxDvdStream.h" />
   </ItemGroup>
   <ItemGroup>

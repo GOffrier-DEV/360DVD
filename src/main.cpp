@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "DvdLogoBounce.h"
+#include "DvdFrameProbe.h"
 #include "XboxDvdStream.h"
 #include <dvdread/dvd_udf.h>
 #include <limits.h>
@@ -286,6 +287,22 @@ namespace
         }
 
         BootLog("DVD logo rendering");
+        DvdFrameProbe frame;
+        bool showFrame = false;
+        FILE* fixture = fopen("game:\\mpeg2-probe.m2v", "rb");
+        const bool compressed = fixture != NULL;
+        if (!fixture)
+            fixture = fopen("game:\\dvd-frame.yuv", "rb");
+        if (fixture)
+        {
+            const HRESULT frameStatus = compressed ? frame.DecodeMpeg2(device, fixture)
+                                                   : frame.Load(device, fixture);
+            fclose(fixture);
+            showFrame = SUCCEEDED(frameStatus);
+            BootLog(compressed ? (showFrame ? "CPU MPEG-2 frame ready" : "CPU MPEG-2 probe failed")
+                               : (showFrame ? "YUV test frame ready" : "YUV test frame failed"),
+                    frameStatus);
+        }
         // Keep synchronous optical I/O off the render thread.
         ProbeLog("starting probe thread");
         HANDLE probeThread = CreateThread(NULL, 0, ProbeDvd, NULL, 0, NULL);
@@ -310,7 +327,10 @@ namespace
             device->Clear(0, NULL, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
             if (SUCCEEDED(device->BeginScene()))
             {
-                animation.Render();
+                if (showFrame)
+                    frame.Draw(device, present.BackBufferWidth, present.BackBufferHeight);
+                else
+                    animation.Render();
                 device->EndScene();
             }
             device->Present(NULL, NULL, NULL, NULL);

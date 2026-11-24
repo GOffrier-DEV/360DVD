@@ -26,7 +26,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <CompileAs>CompileAsC</CompileAs>
-      <AdditionalIncludeDirectories>port\xbox360\include;port\xbox360;deps\libdvdread\src;deps\libdvdread\src\dvdread;deps\libdvdread\src\file;deps\libdvdnav\src;deps\libdvdnav\src\dvdnav;deps\libdvdnav\src\vm;deps\libdvdcss\src;deps\libdvdcss\src\dvdcss;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>port\xbox360\include;port\xbox360;deps\libdvdread\src;deps\libdvdread\src\dvdread;deps\libdvdread\src\file;deps\libdvdnav\src;deps\libdvdnav\src\dvdnav;deps\libdvdnav\src\vm;deps\libdvdcss\src;deps\libdvdcss\src\dvdcss;deps\libmpeg2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_CONFIG_H;DVD360_XBOX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>-std=c11 -Wno-incompatible-pointer-types %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -63,6 +63,14 @@
     <ClCompile Include="deps\libdvdcss\src\libdvdcpxm.c" />
     <ClCompile Include="deps\libdvdcss\src\libdvdcss.c" />
     <ClCompile Include="port\xbox360\dvdcss_ioctl.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\alloc.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\cpu_accel.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\cpu_state.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\decode.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\header.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\idct.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\motion_comp.c" />
+    <ClCompile Include="deps\libmpeg2\libmpeg2\slice.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

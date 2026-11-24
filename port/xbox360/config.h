@@ -36,6 +36,9 @@
 #define off64_t int64_t
 #endif
 #define WORDS_BIGENDIAN 1
+#define ATTR_ALIGN(n) __attribute__((aligned(n)))
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
 
 #define PACKAGE_VERSION "xbox360"
 #define VERSION "xbox360"

@@ -8,3 +8,10 @@
   alpha-mask texture derived from the PNG for the Xbox 360 rendering test.
 - The SVG is identified on Wikimedia Commons as public domain due to simple
   geometric shapes/text, but may still be subject to trademark restrictions.
+
+## Xbox 360 Blades resources
+
+`Blades/` contains adapted Xbox 360 dashboard DVD layouts and original
+icons, plus the Xenon font from the installed SDK. These are Microsoft
+assets and are not covered by the DVD logo's attribution or the project's
+source-code license.

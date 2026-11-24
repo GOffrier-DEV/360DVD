@@ -12,22 +12,16 @@ class DvdFrameProbe
 public:
     DvdFrameProbe();
     ~DvdFrameProbe();
-    HRESULT Load(IDirect3DDevice9* device, HANDLE file);
-    HRESULT DecodeMpeg2(IDirect3DDevice9* device, HANDLE file);
+    HRESULT DecodeMpeg2(IDirect3DDevice9* device);
     void Stop();
     HRESULT StartEmbeddedAudio();
     bool RequestNextAudioTrack();
-    HRESULT PollAudioTrack(bool paused, bool muted);
+    HRESULT PollAudioTrack(bool paused);
     HRESULT SetEmbeddedAudioPaused(bool paused);
-    HRESULT SetEmbeddedAudioMuted(bool muted);
-    bool RequestSeek(double seconds);
-    HRESULT PollSeek();
-    bool ChapterTarget(double position, bool next, double& target) const;
     double DurationSeconds() const;
     float DisplayAspect() const;
     unsigned SubtitleCount() const;
     const char* TrackLanguage(bool subtitle, unsigned track = 0) const;
-    unsigned ChapterCount() const;
     unsigned DiscSegment() const { return m_discSegment; }
     DvdMenuState DiscMenuState() const;
     bool DiscTransitionPending() const;

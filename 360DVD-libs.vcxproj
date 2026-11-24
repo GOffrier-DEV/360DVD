@@ -31,6 +31,11 @@
       <AdditionalOptions>-std=c11 -Wno-incompatible-pointer-types %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(DvdDiagnosticBuild)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>DVD360_LOGGING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="deps\libdvdread\src\bitreader.c" />
     <ClCompile Include="deps\libdvdread\src\dvd_input.c" />
@@ -38,7 +43,7 @@
     <ClCompile Include="deps\libdvdread\src\dvd_udf.c" />
     <ClCompile Include="deps\libdvdread\src\ifo_print.c" />
     <ClCompile Include="deps\libdvdread\src\ifo_read.c" />
-    <ClCompile Include="deps\libdvdread\src\logger.c"><ObjectFileName>$(IntDir)dvdread_logger.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="port\xbox360\dvdread_logger.c" />
     <ClCompile Include="deps\libdvdread\src\md5.c" />
     <ClCompile Include="deps\libdvdread\src\nav_print.c" />
     <ClCompile Include="deps\libdvdread\src\nav_read.c" />

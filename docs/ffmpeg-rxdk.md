@@ -30,42 +30,24 @@ FFmpeg threading or built-in I/O protocols: keep FFmpeg calls on one
 playback worker and use custom AVIO for input. Building the archives does
 not verify a title link or on-console playback.
 
-## VOB file input
+## Optical DVD input
 
-The FFmpeg file reader prefetches up to four 128 KiB chunks on a
-dedicated thread. AVIO waits only when no prefetched bytes are ready;
-seeks invalidate queued data and any in-flight read from the old position.
-`ReadFile` timings measure the reader thread's work, not decode stalls.
+`src/FfmpegFileIo.cpp` feeds libdvdnav-selected sectors to FFmpeg through a
+non-seekable custom AVIO context without changing `deps/ffmpeg`. A dedicated
+reader prefetches up to four 128 KiB chunks. AVIO waits only when no bytes
+are ready. Navigation boundaries drain or replace queued data according to
+the DVD VM event.
 
-`src/FfmpegFileIo.cpp` adapts a synchronous Xbox file handle to FFmpeg
-without changing `deps/ffmpeg`. Open a VOB with `CreateFileA` using normal
-buffered I/O (not `FILE_FLAG_NO_BUFFERING` or `FILE_FLAG_OVERLAPPED`).
-Attach the result of `CreateFfmpegFileIo` to `AVFormatContext::pb` and set
-`AVFMT_FLAG_CUSTOM_IO` before calling `avformat_open_input`. Close the
-format context, destroy the AVIO context, then close the file handle.
-The adapter handles short reads, EOF, and 64-bit seeks. It is for regular
-files, not raw DVD device reads.
-
-With the archives built, run `.\build.ps1 -FfmpegProbe` from PowerShell.
-Deploy `build\Release\360DVD.xex` and its `Media` folder as usual and put
-an unencrypted VOB beside the XEX as `ffmpeg-probe.vob`. Retrieve
-`game:\ffmpeg-vob.log`. The startup probe lists stream IDs and codecs,
-seeks back to the start of the video stream, and counts audio and video
-packets in the next 256 packets or until EOF. `VOB probe status=0` means
-the seek succeeded and at least one video packet was read; for an audio
-fixture, also check that its codec is listed and that audio packets
-were read. This is a demux probe, not FFmpeg playback.
-
-## Experimental AltiVec build
+## AltiVec build
 
 In WSL, run `bash tools/configure-ffmpeg-rxdk.sh --xbox-altivec` and
 `make -C build/ffmpeg-rxdk-altivec -j8`. Then run
-`.\build.ps1 -FfmpegAltivec` in PowerShell. The title goes to
-`build\Release-altivec`; the scalar build stays in `build\Release`.
+`.\build.ps1` or `.\build.ps1 -Configuration Debug` in PowerShell.
+Both configurations link the AltiVec archives.
 Motion estimation remains scalar. The experimental IDCT replaces
 `VMHRADDSHS` with exact split-byte products, rounding shifts, and a
 saturating pack. Xenon IDCT is enabled by default in this build. Place
-an empty `ffmpeg-scalar-idct.enable` beside the XEX to test scalar IDCT
+an empty `ffmpeg-scalar-idct.enable` beside a Debug XEX to test scalar IDCT
 with the same build. No files in the FFmpeg source tree are patched.
 Verify visual output and frame counts on console
 before comparing `video_codec_ms`, underruns, and total playback time
@@ -111,10 +93,9 @@ Use the same affinity marker setting in both runs. Audio remains
 single-threaded and its refill policy is unchanged.
 
 - Build normally with `.\build.ps1`; libmpeg2 is no longer built or linked.
-  Place an unencrypted `dvd-video.vob` next to the XEX for FFmpeg video
-  playback. If absent, the title tries `mpeg2-probe.m2v` with optional
-  `mpeg2-probe.pcm` audio. FFmpeg selects a supported embedded track
-  from the VOB and converts it to 48 kHz, stereo, signed 16-bit PCM for
+  Insert a physical DVD. libdvdnav supplies the program stream to FFmpeg,
+  which selects a supported audio track and converts it to 48 kHz, stereo,
+  signed 16-bit PCM for
   XAudio2. Playback starts on the first presented video frame and uses
   the XAudio2 sample clock as master. During an audio underrun, video
   normally holds. Startup targets six decoded frames, 16 XAudio2 buffers,

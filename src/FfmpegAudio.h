@@ -19,8 +19,6 @@ public:
     HRESULT Start();
     void AllowPrimedStart() { m_allowPrimedStart = true; }
     HRESULT SetPaused(bool paused);
-    HRESULT SetMuted(bool muted);
-    HRESULT ResetForSeek();
     void Finish();
     double Advance(double fallback, bool videoBackpressure);
     unsigned RecoveryTicks() const { return m_recoveryTicks; }

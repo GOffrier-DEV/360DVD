@@ -59,11 +59,11 @@
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <AdditionalIncludeDirectories>port\xbox360\include;port\xbox360;deps\libdvdread\src;deps\libdvdread\src\dvdread;deps\libdvdread\src\file;deps\libdvdnav\src;deps\libdvdnav\src\dvdnav;deps\libdvdnav\src\vm;deps\libdvdcss\src;deps\libdvdcss\src\dvdcss;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_XBOX;XBOX;HAVE_CONFIG_H;_XBOX_CRT_DEPRECATE_INSECURE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>DVD360_FFMPEG_ALTIVEC;_XBOX;XBOX;HAVE_CONFIG_H;_XBOX_CRT_DEPRECATE_INSECURE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <GenerateMapFile>true</GenerateMapFile>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <GenerateMapFile>false</GenerateMapFile>
     </Link>
     <ImageXex>
       <ConfigurationFile>$(ProjectDir)xex.xml</ConfigurationFile>
@@ -71,16 +71,19 @@
     <Deploy>
       <ExcludedFromBuild Condition="'$(BuildingInsideVisualStudio)'!='true'">true</ExcludedFromBuild>
       <DeploymentType>CopyToHardDrive</DeploymentType>
-      <DeploymentFiles>$(RemoteRoot)=$(ImagePath);$(RemoteRoot)\Media=$(OutDir)Media</DeploymentFiles>
+      <DeploymentFiles>$(RemoteRoot)=$(ImagePath)</DeploymentFiles>
     </Deploy>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>DVD360_LOGGING;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateMapFile>true</GenerateMapFile>
       <AdditionalDependencies>$(DvdLibraries);$(RxdkHelperLib);xuirund.lib;xuirenderd.lib;d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xapilibd.lib;xaudio2.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -103,8 +106,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(FfmpegBuildDir)' != ''">
     <ClCompile>
-      <PreprocessorDefinitions Condition="'$(FfmpegProbe)' == 'True'">DVD360_FFMPEG_PROBE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(FfmpegBuildDir);$(FfmpegSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(EmbeddedResourceDir);$(FfmpegBuildDir);$(FfmpegSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;%(AdditionalDependencies)</AdditionalDependencies>
@@ -115,13 +117,8 @@
     <ClCompile Include="src\FfmpegThreadPlatform.cpp" />
     <ClCompile Include="src\PlaybackOsd.cpp" />
     <ClCompile Include="src\FfmpegAudio.cpp" />
-    <ClCompile Include="src\FfmpegVobProbe.cpp" Condition="'$(FfmpegProbe)' == 'True'" />
+    <ClCompile Include="src\DvdEmbeddedResources.cpp" />
   </ItemGroup>
-  <ItemDefinitionGroup Condition="'$(FfmpegAltivec)' == 'True'">
-    <ClCompile>
-      <PreprocessorDefinitions>DVD360_FFMPEG_ALTIVEC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-    </ClCompile>
-  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
@@ -138,19 +135,6 @@
     <ClInclude Include="src\DvdLogoBounce.h" />
     <ClInclude Include="src\DvdFrameProbe.h" />
     <ClInclude Include="src\XboxDvdStream.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <CustomBuild Include="tools\build-osd-atlas.ps1">
-      <Message>Building antialiased playback font and dashboard button glyphs</Message>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "%(FullPath)" "$(OutDir)Media\playback-osd.atlas" -DashboardAssets "%USERPROFILE%\Downloads\shrdres.xzp(unpacked)"</Command>
-      <Outputs>$(OutDir)Media\playback-osd.atlas</Outputs>
-    </CustomBuild>
-    <CustomBuild Include="media\dvd-video-logo.bmp">
-      <Message>Copying DVD logo texture</Message>
-      <Command>if not exist "$(OutDir)Media" mkdir "$(OutDir)Media"
-copy /y "%(FullPath)" "$(OutDir)Media\dvd-video-logo.bmp" &gt;nul</Command>
-      <Outputs>$(OutDir)Media\dvd-video-logo.bmp</Outputs>
-    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

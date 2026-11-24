@@ -27,13 +27,15 @@ it was deliberate.
 
 ## Reproduce and compare
 
-1. Place an empty `dvd-vm-trace.enable` file beside `360DVD.xex`.
-2. Boot the **main disc** from First Play, choose one country, and wait for the
+The VM instruction traces above came from a development build. Current builds
+log navigation events and cell locations, but no longer trace VM instructions.
+
+1. Boot the **main disc** from First Play, choose one country, and wait for the
    main menu without pressing **A** again.
-3. Save `360DVD-nav.log` and `360DVD.log` before restarting; the next disc
+2. Save `360DVD-nav.log` and `360DVD.log` before restarting; the next disc
    session overwrites the navigation log. Repeat for the other country.
-4. Compare the button number, register changes, VM links, and subsequent
-   `DVD cell` lines. Use playback logs to check that the entered cells were
+3. Compare the button number and subsequent `DVD cell` lines. Use playback
+   logs to check that the entered cells were
    actually presented. A VM jump past a warning and a warning cell entered
    but not rendered are different bugs.
 

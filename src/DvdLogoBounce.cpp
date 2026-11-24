@@ -1,4 +1,5 @@
 #include "DvdLogoBounce.h"
+#include "DvdEmbeddedResources.h"
 
 #include <d3dx9.h>
 #include <xgraphics.h>
@@ -52,6 +53,7 @@ namespace
 
     void StartupLog(const char* message, HRESULT result = S_OK)
     {
+#ifdef DVD360_LOGGING
         char line[256];
         sprintf_s(line, sizeof(line), "%s (hr=0x%08X)\r\n",
                   message, (unsigned int)result);
@@ -67,6 +69,7 @@ namespace
             WriteFile(file, line, (DWORD)strlen(line), &written, NULL);
             CloseHandle(file);
         }
+#endif
     }
 
     const char* kVertexShaderSource =
@@ -151,17 +154,11 @@ bool DvdLogoBounce::Startup(IDirect3DDevice9* device, int screenWidth, int scree
 
 bool DvdLogoBounce::LoadLogoTexture()
 {
-    FILE* file = fopen("game:\\Media\\dvd-video-logo.bmp", "rb");
-    if (!file)
-    {
-        StartupLog("Could not open game:\\Media\\dvd-video-logo.bmp");
-        return false;
-    }
-
-    BYTE fileHeader[14];
-    BYTE infoHeader[40];
-    bool ok = fread(fileHeader, sizeof(fileHeader), 1, file) == 1 &&
-              fread(infoHeader, sizeof(infoHeader), 1, file) == 1;
+    UINT size;
+    const BYTE* fileHeader = FindDvdResource(L"dvd-video-logo.bmp", size);
+    if (!fileHeader || size < 54) return false;
+    const BYTE* infoHeader = fileHeader + 14;
+    bool ok = true;
 
     const WORD type = ok ? ReadLittleEndian16(fileHeader) : 0;
     const DWORD pixelOffset = ok ? ReadLittleEndian32(fileHeader + 10) : 0;
@@ -172,12 +169,11 @@ bool DvdLogoBounce::LoadLogoTexture()
     const WORD bitCount = ok ? ReadLittleEndian16(infoHeader + 14) : 0;
     const DWORD compression = ok ? ReadLittleEndian32(infoHeader + 16) : 0;
 
-    if (!ok || type != 0x4D42 || infoSize < sizeof(infoHeader) ||
+    if (type != 0x4D42 || infoSize < 40 ||
         bitmapWidth <= 0 || bitmapHeight == 0 || planes != 1 ||
         bitCount != 32 || compression != 0)
     {
         StartupLog("Unsupported or invalid BMP header");
-        fclose(file);
         return false;
     }
 
@@ -191,7 +187,6 @@ bool DvdLogoBounce::LoadLogoTexture()
     if (FAILED(hr))
     {
         StartupLog("CreateTexture failed", hr);
-        fclose(file);
         return false;
     }
 
@@ -199,17 +194,15 @@ bool DvdLogoBounce::LoadLogoTexture()
     if (FAILED(m_texture->LockRect(0, &locked, NULL, 0)))
     {
         StartupLog("Logo texture LockRect failed");
-        fclose(file);
         return false;
     }
 
-    if (fseek(file, (long)pixelOffset, SEEK_SET) != 0)
-    {
-        StartupLog("Could not seek to BMP pixel data");
-        ok = false;
-    }
-
     const DWORD imageBytes = rowBytes * (DWORD)height;
+    if (pixelOffset > size || imageBytes > size - pixelOffset)
+    {
+        m_texture->UnlockRect(0);
+        return false;
+    }
     BYTE* pixels = new BYTE[imageBytes];
     if (!pixels)
         ok = false;
@@ -218,12 +211,7 @@ bool DvdLogoBounce::LoadLogoTexture()
     {
         const int destinationY = topDown ? sourceY : height - 1 - sourceY;
         BYTE* row = pixels + destinationY * rowBytes;
-        if (fread(row, rowBytes, 1, file) != 1)
-        {
-            StartupLog("Short read in BMP pixel data");
-            ok = false;
-            break;
-        }
+        memcpy(row, fileHeader + pixelOffset + sourceY * rowBytes, rowBytes);
     }
 
     if (ok)
@@ -233,7 +221,6 @@ bool DvdLogoBounce::LoadLogoTexture()
     }
     delete[] pixels;
     m_texture->UnlockRect(0);
-    fclose(file);
     return ok;
 }
 

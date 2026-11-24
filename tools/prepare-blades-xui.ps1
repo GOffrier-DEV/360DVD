@@ -61,7 +61,7 @@ foreach ($name in 'dvd_skin','DvdPadPlayback','DvdPadDisplay') {
     foreach ($image in $layout.SelectNodes('//ImagePath')) {
         if ($image.InnerText -match '^[\w.-]+\.png$' -and
             (Test-Path -LiteralPath (Join-Path $dvd $image.InnerText) -PathType Leaf)) {
-            $image.InnerText = 'file://game:/Media/Blades/' + $image.InnerText
+            $image.InnerText = 'dvd360:///' + $image.InnerText
         }
     }
     $xmlPath = Join-Path $outputDir.FullName "$name.xui"

@@ -68,31 +68,6 @@ void FfmpegAudio::Finish()
     InterlockedExchange(&m_finished, 1);
 }
 
-HRESULT FfmpegAudio::SetMuted(bool muted)
-{
-    return m_voice ? m_voice->SetVolume(muted ? 0.0f : 1.0f) : E_FAIL;
-}
-
-HRESULT FfmpegAudio::ResetForSeek()
-{
-    HRESULT hr = m_voice->Stop(0);
-    if (FAILED(hr)) return hr;
-    hr = m_voice->FlushSourceBuffers();
-    if (FAILED(hr)) return hr;
-    avcodec_flush_buffers(m_codec);
-    av_frame_unref(m_frame);
-    swr_free(&m_resample);
-    XAUDIO2_VOICE_STATE state;
-    m_voice->GetState(&state);
-    m_lastSamples = state.SamplesPlayed;
-    m_recoveryDebt = 0;
-    m_voiceStall = 0;
-    m_voiceRestartAttempts = 0;
-    InterlockedExchange(&m_finished, 0);
-    InterlockedExchange(&m_started, 0);
-    return S_OK;
-}
-
 HRESULT FfmpegAudio::SetPaused(bool paused)
 {
     m_voiceStall = 0;

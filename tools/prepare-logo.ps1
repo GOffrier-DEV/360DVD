@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$source = Join-Path $PSScriptRoot '..\media\dvd-video-logo.png'
-$output = Join-Path $PSScriptRoot '..\media\dvd-video-logo.bmp'
+$source = Join-Path $PSScriptRoot '..\assets\dvd-video-logo.png'
+$output = Join-Path $PSScriptRoot '..\assets\dvd-video-logo.bmp'
 $source = [IO.Path]::GetFullPath($source)
 $output = [IO.Path]::GetFullPath($output)
 

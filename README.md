@@ -2,21 +2,13 @@
 
 DVD player for modded Xbox 360 consoles (RGH/JTAG).
 
-The initial target is DVD playback using `libdvdread` for disc access and
-`libdvdnav` for DVD navigation. Audio output will use RXDK. The H.264 decoder
-in `C:\Users\jason\Documents\Xbox360-GPU-Video-Decoding` is a reference for
-video decoding and presentation; it is not copied or modified by this project.
-CD playback is intentionally out of scope for the first milestone.
+360DVD uses `libdvdread` for disc access, `libdvdnav` for navigation, FFmpeg
+for decoding, and XAudio2 for audio output. CD playback is out of scope.
 
 ## Current status
 
-The first milestone is an Xbox 360 Direct3D smoke test that renders the
-DVD-Video logo bouncing against a black screen. This checks device creation,
-shader/texture setup, presentation, and frame timing before disc playback is
-added.
-
-Disc I/O, DVD navigation, CSS handling, and audio output are not implemented
-yet.
+The player now opens physical DVDs at First Play, follows libdvdnav menus,
+and plays DVD video, audio, and subtitles with the native Blades overlay.
 
 ## DVD navigation notes
 
@@ -32,16 +24,6 @@ selected RXDK/XDK headers and on-console tests before relying on them.
 Desktop-only D3D9 calls listed in `desktop_assumptions_absent` must not be
 assumed available. The memexport APIs are reserved for a later experiment.
 
-## Planned milestones
-
-1. Build and run the DVD logo rendering smoke test on console.
-2. Add the XEX application shell and controller-driven UI.
-3. Integrate `libdvdread` and `libdvdnav`; validate disc detection and menu
-   navigation independently of playback.
-4. Implement DVD video presentation and RXDK audio output.
-5. Add CSS support behind a separate, documented decryption interface.
-6. Revisit CD playback after DVD playback is stable.
-
 ## Build
 
 The initial project targets the Xbox 360 XDK/MSBuild project format used by
@@ -52,23 +34,24 @@ XDK tools installed, run:
 .\build.ps1
 ```
 
-The expected output is `build\Release\360DVD.xex` and its `Media` folder.
-The project builds successfully in both Debug and Release with the installed
-Xbox 360 SDK. Copy the XEX and its `Media` folder to an RGH/JTAG console to
-test. The app writes startup diagnostics to `game:\360DVD.log`. On-console
-behavior is not yet verified.
+The build has two configurations. Both use AltiVec and embed the Blades
+scenes, icons, font, and DVD logo in the XEX.
+
+- `.\build.ps1` → `build\Release\360DVD.xex`, without app logging or symbols.
+- `.\build.ps1 -Configuration Debug` → `build\Debug\360DVD.xex`, with symbols
+  and app logs.
+
+Deploy only the XEX. The source resources are under [`assets/`](assets/);
+the build compiles the XUI layouts and embeds them with the images and font.
 
 ### FFmpeg playback
 
 Build the required FFmpeg archives in WSL first; see
-[FFmpeg on RXDK](docs/ffmpeg-rxdk.md). Place an unencrypted
-`dvd-video.vob` beside the XEX for video playback, or use the
-`mpeg2-probe.m2v` and optional `mpeg2-probe.pcm` fixtures. For a VOB,
-the title selects a supported embedded audio track and plays it through XAudio2.
+[FFmpeg on RXDK](docs/ffmpeg-rxdk.md). Insert a physical DVD. Audio plays
+through XAudio2.
 
-For playback timings, retrieve `game:\360DVD-pacing.csv` after the clip
-ends. If playback stalls, retrieve `game:\360DVD-pacing-live.csv` (the
-first two seconds) and `game:\360DVD.log` (progress every two seconds).
+In Debug, retrieve `game:\360DVD-pacing.csv` after playback ends. If
+playback stalls, retrieve `game:\360DVD.log` and `game:\360DVD-nav.log`.
 The trace includes XAudio2's sample clock and queue depth, expired video
 frames, and separate video codec, demux, and `ReadFile` measurements.
 Demux time includes `ReadFile` time; don't add them together.
@@ -93,4 +76,4 @@ code.
 The rendering test uses the DVD-Video logo artwork from [Wikimedia
 Commons](https://commons.wikimedia.org/wiki/File:DVD-Video_Logo.svg), sourced
 to DVD Format / Logo Licensing Company. The logo may be subject to trademark
-restrictions. See `media/ATTRIBUTION.md`.
+restrictions. See `assets/ATTRIBUTION.md`.

@@ -20,9 +20,6 @@ struct FfmpegReadStats
     LONGLONG ticks, worstTicks;
 };
 
-// Borrows a synchronous, seekable file handle. Keep it open and do not share
-// its file position until the format context and this AVIO context are closed.
-AVIOContext* CreateFfmpegFileIo(HANDLE file, FfmpegReadStats* stats = NULL);
 AVIOContext* CreateFfmpegDiscIo(FfmpegReadStats* stats, HRESULT& status);
 void LogDvdNavStartup(const char* message, bool reset = false);
 bool ResumeFfmpegDiscWait(AVIOContext* io, bool acknowledge);

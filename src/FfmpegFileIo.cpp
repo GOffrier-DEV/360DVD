@@ -19,7 +19,6 @@ void dvdnav_xbox_cell_location(dvdnav_t* nav, int* domain, int* vts, int* pgc);
 
 namespace
 {
-    bool navVmTrace;
     struct NavLogLock
     {
         CRITICAL_SECTION lock;
@@ -30,6 +29,7 @@ namespace
 
 void LogDvdNavStartup(const char* message, bool reset)
 {
+#ifdef DVD360_LOGGING
     EnterCriticalSection(&navLogLock.lock);
     HANDLE log = CreateFileA("game:\\360DVD-nav.log", GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, reset ? CREATE_ALWAYS : OPEN_ALWAYS,
@@ -46,18 +46,20 @@ void LogDvdNavStartup(const char* message, bool reset)
     if (size > 0) WriteFile(log, line, size, &written, NULL);
     CloseHandle(log);
     LeaveCriticalSection(&navLogLock.lock);
+#endif
 }
 
-extern "C" int dvd360_vm_trace_enabled(void) { return navVmTrace; }
-extern "C" void dvd360_vm_trace_line(const char* message) { LogDvdNavStartup(message); }
 
 namespace
 {
+#ifndef DVD360_LOGGING
+    void SilentDvdLog(void*, dvdnav_logger_level_t, const char*, va_list) {}
+    const dvdnav_logger_cb silentDvdLogger = { SilentDvdLog };
+#endif
     enum { ChunkSize = 128 * 1024, ChunkCount = 4 };
 
     struct FileInput
     {
-        HANDLE file;
         XboxDvdStream* disc;
         dvdnav_t* nav;
         int navTerminal;
@@ -81,8 +83,7 @@ namespace
         CRITICAL_SECTION lock;
         uint8_t* bytes;
         DWORD lengths[ChunkCount];
-        unsigned head, count, consumed, generation;
-        int64_t position, nextRead, fileSize;
+        unsigned head, count, consumed;
         int terminal;
         bool stopping;
         bool navFirstBlock;
@@ -159,14 +160,19 @@ namespace
 
     HRESULT OpenDisc(FileInput& input)
     {
-        navVmTrace = GetFileAttributesA("game:\\dvd-vm-trace.enable") != DWORD(-1);
         LogDvdNavStartup("Opening Xbox optical transport", true);
         input.disc = new XboxDvdStream();
         if (!input.disc) return E_OUTOFMEMORY;
         if (!input.disc->Open())
             return HRESULT_FROM_NT(input.disc->LastStatus());
         LogDvdNavStartup("Opening libdvdnav VM");
-        if (dvdnav_open_stream(&input.nav, input.disc, input.disc->ReaderAuthCallbacks()) != DVDNAV_STATUS_OK)
+#ifdef DVD360_LOGGING
+        const dvdnav_status_t opened = dvdnav_open_stream(&input.nav, input.disc, input.disc->ReaderAuthCallbacks());
+#else
+        const dvdnav_status_t opened = dvdnav_open_stream2(&input.nav, input.disc, &silentDvdLogger,
+                                                          input.disc->ReaderAuthCallbacks());
+#endif
+        if (opened != DVDNAV_STATUS_OK)
         {
             LogDvdNavStartup("libdvdnav open failed");
             return E_FAIL;
@@ -348,7 +354,6 @@ namespace
         if (PlaybackAffinity::Enabled())
             PlaybackAffinity::Pin(PlaybackAffinity::Reader);
         FileInput& input = *static_cast<FileInput*>(opaque);
-        int64_t physical = -1;
         for (;;)
         {
             EnterCriticalSection(&input.lock);
@@ -392,46 +397,27 @@ namespace
                 continue;
             }
             const unsigned slot = (input.head + input.count) % ChunkCount;
-            const unsigned generation = input.generation;
-            const int64_t offset = input.nextRead;
             LeaveCriticalSection(&input.lock);
 
-            LARGE_INTEGER start, end, distance;
-            distance.QuadPart = offset;
+            LARGE_INTEGER start, end;
             DWORD received = 0;
-            const bool positioned = input.nav || physical == offset ||
-                SetFilePointerEx(input.file, distance, NULL, FILE_BEGIN);
             QueryPerformanceCounter(&start);
-            uint8_t* target = input.bytes + slot * ChunkSize;
-            BOOL ok = TRUE;
-            if (input.nav) ReadDisc(input, target, received);
-            else ok = positioned && ReadFile(input.file, target, ChunkSize, &received, NULL);
-            const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+            ReadDisc(input, input.bytes + slot * ChunkSize, received);
             QueryPerformanceCounter(&end);
-            physical = ok ? offset + received : -1;
 
             EnterCriticalSection(&input.lock);
             const LONGLONG ticks = end.QuadPart - start.QuadPart;
-            if (positioned)
+            ++input.totals.calls;
+            input.totals.bytes += received;
+            input.totals.ticks += ticks;
+            if (ticks > input.totals.worstTicks) input.totals.worstTicks = ticks;
+            if (received)
             {
-                ++input.totals.calls;
-                input.totals.bytes += received;
-                input.totals.ticks += ticks;
-                if (ticks > input.totals.worstTicks)
-                    input.totals.worstTicks = ticks;
+                input.lengths[slot] = received;
+                ++input.count;
             }
-            if (generation == input.generation)
-            {
-                if (ok && received)
-                {
-                    input.lengths[slot] = received;
-                    ++input.count;
-                    input.nextRead += received;
-                }
-                else
-                    input.terminal = input.nav ? input.navTerminal :
-                        ok || error == ERROR_HANDLE_EOF ? AVERROR_EOF : AVERROR(EIO);
-            }
+            else
+                input.terminal = input.navTerminal;
             LeaveCriticalSection(&input.lock);
             SetEvent(input.dataReady);
         }
@@ -451,7 +437,6 @@ namespace
                 const DWORD available = input.lengths[input.head] - input.consumed;
                 const DWORD copied = available < static_cast<DWORD>(size) ? available : size;
                 memcpy(buffer, input.bytes + input.head * ChunkSize + input.consumed, copied);
-                input.position += copied;
                 input.consumed += copied;
                 if (input.consumed == input.lengths[input.head])
                 {
@@ -470,37 +455,6 @@ namespace
             if (WaitForSingleObject(input.dataReady, INFINITE) != WAIT_OBJECT_0)
                 return AVERROR(EIO);
         }
-    }
-
-    int64_t Seek(void* opaque, int64_t offset, int whence)
-    {
-        FileInput& input = *static_cast<FileInput*>(opaque);
-        whence &= ~AVSEEK_FORCE;
-        if (whence == AVSEEK_SIZE)
-            return input.fileSize;
-        // FFmpeg is the sole consumer, so only it advances position.
-        int64_t base;
-        switch (whence)
-        {
-        case SEEK_SET: base = 0; break;
-        case SEEK_CUR: base = input.position; break;
-        case SEEK_END: base = input.fileSize; break;
-        default: return AVERROR(EINVAL);
-        }
-        if (offset < -base || offset > INT64_MAX - base)
-            return AVERROR(EINVAL);
-        const int64_t position = base + offset;
-        EnterCriticalSection(&input.lock);
-        if (input.position != position)
-        {
-            ++input.generation;
-            input.head = input.count = input.consumed = 0;
-            input.position = input.nextRead = position;
-            input.terminal = 0;
-        }
-        LeaveCriticalSection(&input.lock);
-        SetEvent(input.spaceReady);
-        return position;
     }
 
     void DestroyInput(FileInput* input)
@@ -524,7 +478,7 @@ namespace
     }
 }
 
-static AVIOContext* CreateInput(HANDLE file, bool disc, FfmpegReadStats* stats, HRESULT& status)
+AVIOContext* CreateFfmpegDiscIo(FfmpegReadStats* stats, HRESULT& status)
 {
     status = E_OUTOFMEMORY;
     const int bufferSize = ChunkSize;
@@ -538,22 +492,16 @@ static AVIOContext* CreateInput(HANDLE file, bool disc, FfmpegReadStats* stats, 
         av_free(buffer);
         return NULL;
     }
-    input->file = file;
     input->stats = stats;
     InitializeCriticalSection(&input->lock);
-    LARGE_INTEGER size = {}, zero = {}, position = {};
     input->bytes = static_cast<uint8_t*>(av_malloc(ChunkCount * ChunkSize));
     input->dataReady = CreateEvent(NULL, FALSE, FALSE, NULL);
     input->spaceReady = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (input->bytes && input->dataReady && input->spaceReady)
     {
-        status = disc ? OpenDisc(*input) :
-            GetFileSizeEx(file, &size) && SetFilePointerEx(file, zero, &position, FILE_CURRENT)
-                ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+        status = OpenDisc(*input);
         if (SUCCEEDED(status))
         {
-            if (!disc) input->fileSize = size.QuadPart;
-            input->position = input->nextRead = position.QuadPart;
             input->thread = CreateThread(NULL, 0, ReadWorker, input, 0, NULL);
             if (!input->thread) status = HRESULT_FROM_WIN32(GetLastError());
         }
@@ -565,7 +513,7 @@ static AVIOContext* CreateInput(HANDLE file, bool disc, FfmpegReadStats* stats, 
         return NULL;
     }
     AVIOContext* io = avio_alloc_context(buffer, bufferSize, 0, input,
-                                         ReadPacket, NULL, disc ? NULL : Seek);
+                                         ReadPacket, NULL, NULL);
     if (!io)
     {
         status = E_OUTOFMEMORY;
@@ -573,18 +521,6 @@ static AVIOContext* CreateInput(HANDLE file, bool disc, FfmpegReadStats* stats, 
         av_free(buffer);
     }
     return io;
-}
-
-AVIOContext* CreateFfmpegFileIo(HANDLE file, FfmpegReadStats* stats)
-{
-    if (!file || file == INVALID_HANDLE_VALUE) return NULL;
-    HRESULT status;
-    return CreateInput(file, false, stats, status);
-}
-
-AVIOContext* CreateFfmpegDiscIo(FfmpegReadStats* stats, HRESULT& status)
-{
-    return CreateInput(INVALID_HANDLE_VALUE, true, stats, status);
 }
 
 bool ResumeFfmpegDiscWait(AVIOContext* io, bool acknowledge)

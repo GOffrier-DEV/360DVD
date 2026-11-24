@@ -1,10 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
     [string]$RxdkRoot = 'C:\Program Files\RXDK-360',
-    [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe',
-    [switch]$FfmpegProbe,
-    [switch]$FfmpegAltivec,
-    [string]$BladesXuiSource
+    [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,9 +11,6 @@ $clang = Join-Path $clangRoot 'bin\clang.exe'
 $ar = Join-Path $clangRoot 'bin\llvm-ar.exe'
 $rxdkLib = Join-Path $RxdkRoot 'lib\xbox'
 $output = Join-Path $PSScriptRoot "build\$Configuration"
-if ($FfmpegAltivec) {
-    $output = Join-Path $PSScriptRoot "build\$Configuration-altivec"
-}
 $libraryProject = Join-Path $PSScriptRoot '360DVD-libs.vcxproj'
 $dvdLibrary = Join-Path $PSScriptRoot 'build\libdvd360.a'
 $runtime = Join-Path $PSScriptRoot "build\runtime"
@@ -24,18 +18,15 @@ $helperObjects = Join-Path $runtime 'helper-objects'
 $helperLib = Join-Path $runtime 'xdk-compiler-helpers.lib'
 $project = Join-Path $PSScriptRoot '360DVD.vcxproj'
 $deviceSource = Join-Path $PSScriptRoot 'build\obj\libs\device_xbox360.c'
-$ffmpegBuild = Join-Path $PSScriptRoot 'build\ffmpeg-rxdk'
-if ($FfmpegAltivec) {
-    $ffmpegBuild += '-altivec'
-}
+$dvdDebug = if ($Configuration -eq 'Debug') { 'true' } else { 'false' }
+$ffmpegBuild = Join-Path $PSScriptRoot 'build\ffmpeg-rxdk-altivec'
 foreach ($lib in 'avformat', 'avcodec', 'swresample', 'avutil') {
     if (-not (Test-Path "$ffmpegBuild\lib$lib\lib$lib.a")) {
         throw 'Build FFmpeg from WSL first; see docs/ffmpeg-rxdk.md.'
     }
 }
 $ffmpegProperties = @("/p:FfmpegBuildDir=$ffmpegBuild",
-    "/p:FfmpegSourceDir=$(Join-Path $PSScriptRoot 'deps\ffmpeg')", "/p:FfmpegProbe=$FfmpegProbe",
-    "/p:FfmpegAltivec=$FfmpegAltivec")
+    "/p:FfmpegSourceDir=$(Join-Path $PSScriptRoot 'deps\ffmpeg')")
 
 foreach ($tool in @($MSBuild, $clang, $ar)) {
     if (-not (Test-Path $tool)) { throw "Required build tool not found: $tool" }
@@ -90,6 +81,7 @@ $null = New-Item -ItemType Directory -Force (Split-Path $deviceSource)
 
 & $MSBuild $libraryProject /t:ClCompile /nologo /v:minimal `
     '/p:Configuration=Release' '/p:Platform=Xbox 360' `
+    "/p:RxdkClangDebug=$dvdDebug" "/p:DvdDiagnosticBuild=$dvdDebug" `
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `
     "/p:RxdkLibcDir=$runtime"
 if ($LASTEXITCODE -ne 0) { throw 'Compiling the DVD libraries with RXDK Clang failed.' }
@@ -107,19 +99,25 @@ $objects = $helperMembers | ForEach-Object { Join-Path $helperObjects $_ }
 & $ar rcs $helperLib @objects
 if ($LASTEXITCODE -ne 0) { throw 'Could not create RXDK Clang ABI helper archive.' }
 
+$resourceDir = Join-Path $PSScriptRoot "build\embedded\$Configuration"
+& (Join-Path $PSScriptRoot 'tools\embed-resources.ps1') -Directory $resourceDir `
+    -Assets (Join-Path $PSScriptRoot 'assets') -RxdkRoot $RxdkRoot
+
 & $MSBuild $project /m:1 /t:Rebuild /nologo /v:minimal `
     "/p:Configuration=$Configuration" '/p:Platform=Xbox 360' `
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `
     "/p:RxdkLibcDir=$runtime" "/p:RxdkHelperLib=$helperLib" `
     "/p:DvdLibraries=$dvdLibrary" `
+    "/p:EmbeddedResourceDir=$resourceDir" `
     @ffmpegProperties `
     "/p:OutDir=$output\" "/p:IntDir=$(Join-Path $PSScriptRoot "build\obj\$Configuration")\"
 if ($LASTEXITCODE -ne 0) {
     throw "360DVD build failed with exit code $LASTEXITCODE"
 }
+if ($Configuration -eq 'Release') {
+    # RXDK's packer can emit a symbol sidecar even without compiler debug info.
+    $symbolFile = Join-Path $output '360DVD.xdb'
+    if (Test-Path -LiteralPath $symbolFile) { Remove-Item -LiteralPath $symbolFile -Force }
+}
 
 Write-Host "Built: $(Join-Path $output '360DVD.xex')"
-if ($BladesXuiSource) {
-    & (Join-Path $PSScriptRoot 'tools\prepare-blades-xui.ps1') `
-        -Source $BladesXuiSource -Output (Join-Path $output 'Media\Blades') -RxdkRoot $RxdkRoot
-}

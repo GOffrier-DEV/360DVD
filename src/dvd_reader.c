@@ -1184,7 +1184,11 @@ static dvd_file_t *DVDOpenVOBUDF( dvd_reader_t *ctx, int title, int menu,
   dvdinput_set_stream( ctx->rd->dev, stream_type );
 
   if( stream_type == DVD_V && ctx->rd->css_state == 1 /* Need key init */ ) {
+#ifndef DVD360_XBOX
     initAllCSSKeys( ctx );
+#endif
+    /* Xbox requests the current VOB key in DVDReadBlocks; don't scan
+       unrelated titles before First Play can produce any video. */
     ctx->rd->css_state = 2;
   }
 

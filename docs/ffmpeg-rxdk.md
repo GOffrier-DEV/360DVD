@@ -100,8 +100,7 @@ can also read ahead toward 12 compressed video packets. Read-ahead is
 limited to 96 packets and stops once queued video payload reaches the lesser
 of 4 MiB and 1/32 of the available physical RAM sampled at startup. Clock
 recovery remains a fallback. If video gets behind, expired frames are
-skipped. Initial A/V timestamp offsets and discontinuities are not
-compensated.
+skipped.
 
 Pacing samples stay in RAM during playback. A background logger writes
 progress to `360DVD.log` about every two seconds, including while paused.

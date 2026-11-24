@@ -36,7 +36,6 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 
 - Scan/seek, resume bookmarks, and CD playback are not implemented.
 - Motion compensation remains scalar; only the IDCT uses VMX.
-- Initial A/V timestamp offsets and discontinuities are not compensated.
 
 ### Dependencies
 

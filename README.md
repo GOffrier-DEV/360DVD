@@ -56,9 +56,16 @@ behavior is not yet verified.
 
 ## Licensing and dependencies
 
-Before vendoring or distributing `libdvdread` and `libdvdnav`, record their
-licenses and the licenses of all transitive dependencies. Keep third-party
-sources and build outputs separate from the application code.
+The current VideoLAN `master` branches are tracked as Git submodules under
+`deps/`. The superproject pins exact revisions; initialize them after cloning:
+
+```powershell
+git submodule update --init --recursive
+```
+
+See `docs/dependencies.md` for pinned revisions, licenses, and the porting
+boundary. Keep third-party sources and build outputs separate from application
+code.
 
 The rendering test uses the DVD-Video logo artwork from [Wikimedia
 Commons](https://commons.wikimedia.org/wiki/File:DVD-Video_Logo.svg), sourced

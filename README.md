@@ -86,7 +86,14 @@ after cloning:
 git submodule update --init --recursive
 ```
 
-See `docs/dependencies.md` for pinned revisions, licenses, and the porting
+| Library | Upstream project | Source used by 360DVD |
+| --- | --- | --- |
+| `libdvdread` | [VideoLAN libdvdread](https://code.videolan.org/videolan/libdvdread) | [Xbox port branch](https://github.com/GOffrier-DEV/360DVD/tree/libdvdread-xbox) |
+| `libdvdnav` | [VideoLAN libdvdnav](https://code.videolan.org/videolan/libdvdnav) | [Xbox port branch](https://github.com/GOffrier-DEV/360DVD/tree/libdvdnav-xbox) |
+| `libdvdcss` | [VideoLAN libdvdcss](https://code.videolan.org/videolan/libdvdcss) | [Pinned upstream source](https://code.videolan.org/videolan/libdvdcss/-/tree/811ce97a1d4d1c9d936f4b2707f533a9ef768251) |
+| FFmpeg | [FFmpeg](https://ffmpeg.org/) | [Pinned upstream source](https://github.com/FFmpeg/FFmpeg/tree/74e4393595cf2b5857f0da925c4e0dd74ea306e5) |
+
+See [the dependency notes](docs/dependencies.md) for pinned revisions, licenses, and the porting
 boundary. Keep third-party sources and build outputs separate from
 application code.
 

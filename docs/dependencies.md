@@ -8,7 +8,7 @@ builds remain reproducible until the submodules are explicitly advanced.
 | Path | Upstream | Pinned revision | License | Built |
 |---|---|---|---|---|
 | `deps/libdvdread` | this repository, `libdvdread-xbox` | `7.1.1-126-gf0e5736` | GPL-2.0-or-later | yes |
-| `deps/libdvdnav` | this repository, `libdvdnav-xbox` | `7.0.0-20-g32b765b` (reports 7.0.1) | GPL-2.0-or-later | yes |
+| `deps/libdvdnav` | this repository, `libdvdnav-xbox` | `7.0.0-21-gabc995d` (reports 7.0.1) | GPL-2.0-or-later | yes |
 | `deps/libdvdcss` | https://code.videolan.org/videolan/libdvdcss | `1.6.0-7-g811ce97` | GPL-2.0-or-later | yes |
 | `deps/ffmpeg` | https://github.com/FFmpeg/FFmpeg | `n9.1` (`74e4393`) | LGPL-2.1-or-later | yes |
 

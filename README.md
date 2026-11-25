@@ -54,6 +54,25 @@ Xbox 360 SDK. Copy the XEX and its `Media` folder to an RGH/JTAG console to
 test. The app writes startup diagnostics to `game:\360DVD.log`. On-console
 behavior is not yet verified.
 
+### FFmpeg playback
+
+Build the required FFmpeg archives in WSL first; see
+[FFmpeg on RXDK](docs/ffmpeg-rxdk.md). Place an unencrypted
+`dvd-video.vob` beside the XEX for video playback, or use the
+`mpeg2-probe.m2v` and optional `mpeg2-probe.pcm` fixtures. For a VOB,
+the title selects a supported embedded audio track and plays it through XAudio2.
+
+For playback timings, retrieve `game:\360DVD-pacing.csv` after the clip
+ends. If playback stalls, retrieve `game:\360DVD-pacing-live.csv` (the
+first two seconds) and `game:\360DVD.log` (progress every two seconds).
+The trace includes XAudio2's sample clock and queue depth, expired video
+frames, and separate video codec, demux, and `ReadFile` measurements.
+Demux time includes `ReadFile` time; don't add them together.
+Compare `decode_cpu_ms` (decode-thread CPU time) with `decode_frame_ms`
+(elapsed time for the same work) across multiple frames. CPU accounting
+may be coarse; `-1` indicates an unavailable reading. Rows without a new
+frame report zero.
+
 ## Licensing and dependencies
 
 The current VideoLAN `master` branches are tracked as Git submodules under

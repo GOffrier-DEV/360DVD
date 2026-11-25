@@ -6,14 +6,12 @@
 #include <stdlib.h>
 #include "DvdFrameProbe.h"
 
+#include "FfmpegFileIo.h"
+#include "FfmpegAudio.h"
+
 extern "C" {
-#include "../deps/libmpeg2/include/mpeg2.h"
-int dvd360_mpeg2_enable_vmx(void);
-int dvd360_mpeg2_enable_vmx_dc(void);
-int dvd360_mpeg2_enable_vmx_idct(void);
-unsigned dvd360_mpeg2_vmx_blocks(void);
-unsigned dvd360_mpeg2_vmx_dc_blocks(void);
-unsigned dvd360_mpeg2_vmx_idct_blocks(void);
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
 }
 
 namespace
@@ -53,6 +51,16 @@ namespace
         hr = (*texture)->UnlockRect(0);
         return ok ? hr : E_FAIL;
     }
+
+    bool DecodeCpuTime(ULONGLONG& ticks)
+    {
+        FILETIME created, exited, kernel, user;
+        if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+            return false;
+        ticks = ((ULONGLONG)kernel.dwHighDateTime << 32) + kernel.dwLowDateTime
+              + ((ULONGLONG)user.dwHighDateTime << 32) + user.dwLowDateTime;
+        return true;
+    }
 }
 
 struct DvdFrameProbe::QueuedFrame
@@ -63,6 +71,10 @@ struct DvdFrameProbe::QueuedFrame
     double duration;
     LONGLONG parseTicks, readTicks, inputWaitTicks;
     LONGLONG decodeTicks, copyTicks;
+    LONGLONG audioWorkTicks;
+    unsigned videoPacketHighWater;
+    double decodeCpuMs;
+    LONGLONG motionTicks, idctTicks;
     LONGLONG worstReadTicks;
     unsigned readCalls, readBytes;
     HRESULT status;
@@ -73,42 +85,83 @@ struct DvdFrameProbe::Decoder
     CRITICAL_SECTION queueStats;
     unsigned queuedFrames;
     HANDLE file;
-    unsigned readCalls, readBytes;
-    LONGLONG worstReadTicks;
-    mpeg2dec_t* handle;
-    enum { InputSlots = 16 };
-    struct InputChunk
-    {
-        BYTE bytes[128 * 1024];
-        size_t size;
-        bool failed;
-        LONGLONG ticks;
-    };
-    InputChunk input[InputSlots];
-    HANDLE reader, inputFree, inputReady;
-    unsigned inputIndex;
-    bool inputHeld;
-    BYTE* preload;
-    size_t preloadSize;
-    bool preloadFed;
-    BYTE end[8];
+    FfmpegReadStats ioStats;
+    AVIOContext* io;
+    AVFormatContext* format;
+    AVCodecContext* codec;
+    AVFrame* decoded;
+    AVPacket* packet;
+    int video;
+    double frameRate;
+    FfmpegAudio* audio;
+    int audioStream;
+    bool audioFailed;
+    bool videoEnded;
     bool flushed;
+    int demuxEnd;
+    enum { PacketCapacity = 96, PacketByteBudget = 4 * 1024 * 1024 };
+    AVPacket pendingVideo[PacketCapacity];
+    unsigned packetHead, packetCount, packetBytes, packetHighWater;
+    unsigned packetBudget, startupVideoBytes, primedVideoBytes;
+    void PumpPacket();
     HANDLE thread, stop, freeSlots, ready, primed;
     unsigned writeIndex, readIndex, calls;
-    LONGLONG parseTicks, readTicks, inputWaitTicks;
+    LONGLONG parseTicks, inputWaitTicks;
+    LONGLONG audioWorkTicks;
     enum { QueueCapacity = 6 };
     QueuedFrame queue[QueueCapacity];
 };
 
+void DvdFrameProbe::Decoder::PumpPacket()
+{
+    LARGE_INTEGER start, end;
+    QueryPerformanceCounter(&start);
+    int result = av_read_frame(format, packet);
+    QueryPerformanceCounter(&end);
+    inputWaitTicks += end.QuadPart - start.QuadPart;
+    if (result == AVERROR_EOF && io->error < 0)
+        result = io->error;
+    if (result < 0)
+        demuxEnd = result;
+
+    if (result == 0 && packet->stream_index == video)
+    {
+        packetBytes += packet->size;
+        av_packet_move_ref(&pendingVideo[(packetHead + packetCount) % PacketCapacity], packet);
+        ++packetCount;
+        if (packetCount > packetHighWater)
+            packetHighWater = packetCount;
+        return;
+    }
+    if (audio && !audioFailed &&
+        (result == AVERROR_EOF || (result == 0 && packet->stream_index == audioStream)))
+    {
+        QueryPerformanceCounter(&start);
+        audioFailed = FAILED(audio->Decode(result == AVERROR_EOF ? NULL : packet, stop));
+        QueryPerformanceCounter(&end);
+        audioWorkTicks += end.QuadPart - start.QuadPart;
+    }
+    if (audio && (demuxEnd || audioFailed))
+        audio->Finish();
+    av_packet_unref(packet);
+}
+
 DvdFrameProbe::DvdFrameProbe()
     : m_decoder(NULL), m_width(0), m_height(0), m_untilNext(0),
-      m_framesReady(0), m_lateByFrame(0), m_maxLate(0),
+      m_framesReady(0), m_lateByFrame(0), m_audioSyncDrops(0), m_videoPacketHighWater(0),
+      m_audioWorkTicks(0), m_maxLate(0),
       m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
       m_readTicks(0), m_uploadTicks(0), m_gpuWaitTicks(0),
-      m_inputWaitTicks(0), m_lastDecodeTicks(0), m_lastCopyTicks(0),
+      m_inputWaitTicks(0), m_motionTicks(0), m_idctTicks(0),
+      m_lastDecodeTicks(0), m_lastCopyTicks(0),
+      m_lastDecodeCpuMs(-1.0),
       m_worstReadTicks(0), m_readCalls(0), m_readBytes(0),
       m_underruns(0), m_textureSet(0),
-      m_decodeMode("MPEG-2 VMX startup not reached"),
+#ifdef DVD360_FFMPEG_ALTIVEC
+      m_decodeMode("FFmpeg MPEG-2 (experimental AltiVec, scalar IDCT)"),
+#else
+      m_decodeMode("FFmpeg MPEG-2 (scalar)"),
+#endif
       m_motionBlocks(0), m_dcBlocks(0), m_idctBlocks(0),
       m_vs(NULL), m_ps(NULL), m_decl(NULL)
 {
@@ -138,47 +191,23 @@ void DvdFrameProbe::CloseDecoder()
         WaitForSingleObject(d.thread, INFINITE);
         CloseHandle(d.thread);
     }
-    if (d.reader)
-    {
-        WaitForSingleObject(d.reader, INFINITE);
-        CloseHandle(d.reader);
-    }
-    if (d.inputReady) CloseHandle(d.inputReady);
-    if (d.inputFree) CloseHandle(d.inputFree);
     if (d.ready) CloseHandle(d.ready);
     if (d.primed) CloseHandle(d.primed);
     if (d.freeSlots) CloseHandle(d.freeSlots);
     if (d.stop) CloseHandle(d.stop);
-    if (d.handle) mpeg2_close(d.handle);
+    delete d.audio;
+    for (unsigned i = 0; i < Decoder::PacketCapacity; ++i)
+        av_packet_unref(&d.pendingVideo[i]);
+    av_packet_free(&d.packet);
+    av_frame_free(&d.decoded);
+    avcodec_free_context(&d.codec);
+    avformat_close_input(&d.format);
+    DestroyFfmpegFileIo(&d.io);
     DeleteCriticalSection(&d.queueStats);
-    free(d.preload);
+
     CloseHandle(d.file);
     delete m_decoder;
     m_decoder = NULL;
-}
-
-DWORD WINAPI DvdFrameProbe::ReadWorker(void* context)
-{
-    Decoder& d = *static_cast<Decoder*>(context);
-    HANDLE wait[] = {d.stop, d.inputFree};
-    unsigned index = 0;
-    while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
-    {
-        Decoder::InputChunk& chunk = d.input[index];
-        LARGE_INTEGER start, end;
-        QueryPerformanceCounter(&start);
-        DWORD bytes = 0;
-        chunk.failed = !ReadFile(d.file, chunk.bytes, sizeof(chunk.bytes), &bytes, NULL);
-        chunk.size = bytes;
-        QueryPerformanceCounter(&end);
-        chunk.ticks = end.QuadPart - start.QuadPart;
-        const bool done = chunk.failed || chunk.size == 0;
-        index = (index + 1) % Decoder::InputSlots;
-        ReleaseSemaphore(d.inputReady, 1, NULL);
-        if (done)
-            break;
-    }
-    return 0;
 }
 
 DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
@@ -187,25 +216,74 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
     Decoder& d = *player.m_decoder;
     HANDLE wait[] = {d.stop, d.freeSlots};
     unsigned initialFrames = 0;
-    while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+    bool primed = false;
+    bool refillAudio = false;
+    const unsigned audioLow = 8, audioTarget = 16, videoPacketTarget = 12;
+    for (;;)
     {
+        const bool haveAudio = d.audio && !d.audioFailed;
+        const unsigned audioBuffers = haveAudio ? d.audio->QueuedBuffers() : 0;
+        const bool canReadAhead = d.format && !d.demuxEnd &&
+            d.packetCount < Decoder::PacketCapacity && d.packetBytes < d.packetBudget;
+        const bool audioReady = !haveAudio || audioBuffers >= audioTarget;
+        const bool videoReady = d.packetBytes >= d.startupVideoBytes;
+        if (!primed && initialFrames == Decoder::QueueCapacity &&
+            ((audioReady && videoReady) || !canReadAhead || audioBuffers >= 24))
+        {
+            d.primedVideoBytes = d.packetBytes;
+            SetEvent(d.primed);
+            primed = true;
+        }
+        // Refill in bursts; don't spend a render deadline reading ahead when
+        // the decoder has fewer than three ready frames to cover the work.
+        refillAudio = haveAudio && audioBuffers < (refillAudio ? audioTarget : audioLow);
+        const bool needAudio = haveAudio && (refillAudio || !primed);
+        const bool wantPackets = d.packetCount < videoPacketTarget &&
+            (!haveAudio || audioBuffers < audioTarget);
+        const bool readAhead = canReadAhead &&
+            (needAudio || wantPackets || (!primed && !videoReady));
+        const unsigned depth = player.QueueDepth();
+        if (readAhead && primed && refillAudio && depth >= Decoder::QueueCapacity / 2)
+        {
+            if (WaitForSingleObject(d.stop, 0) != WAIT_TIMEOUT)
+                break;
+            d.PumpPacket();
+            continue;
+        }
+        const DWORD available = WaitForMultipleObjects(2, wait, FALSE,
+            readAhead ? 0 : canReadAhead && haveAudio ? 10 : INFINITE);
+        if (available == WAIT_TIMEOUT)
+        {
+            if (readAhead)
+                d.PumpPacket();
+            continue;
+        }
+        if (available != WAIT_OBJECT_0 + 1)
+            break;
         QueuedFrame& frame = d.queue[d.writeIndex];
         LARGE_INTEGER start, finish;
+        ULONGLONG cpuStart = 0, cpuFinish = 0;
+        const bool haveCpuStart = DecodeCpuTime(cpuStart);
         QueryPerformanceCounter(&start);
         const HRESULT status = player.NextFrame(frame);
         QueryPerformanceCounter(&finish);
+        frame.decodeCpuMs = haveCpuStart && DecodeCpuTime(cpuFinish) && cpuFinish >= cpuStart
+            ? (cpuFinish - cpuStart) / 10000.0 : -1.0;
         frame.decodeTicks = finish.QuadPart - start.QuadPart;
         frame.status = status;
         frame.calls = d.calls;
         frame.parseTicks = d.parseTicks;
-        frame.readTicks = d.readTicks;
+        frame.readTicks = d.ioStats.ticks;
         frame.inputWaitTicks = d.inputWaitTicks;
-        frame.worstReadTicks = d.worstReadTicks;
-        frame.readCalls = d.readCalls;
-        frame.readBytes = d.readBytes;
-        frame.motion = dvd360_mpeg2_vmx_blocks();
-        frame.dc = dvd360_mpeg2_vmx_dc_blocks();
-        frame.idct = dvd360_mpeg2_vmx_idct_blocks();
+        frame.audioWorkTicks = d.audioWorkTicks;
+        frame.videoPacketHighWater = d.packetHighWater;
+        frame.motionTicks = frame.idctTicks = 0;
+        frame.worstReadTicks = d.ioStats.worstTicks;
+        frame.readCalls = d.ioStats.calls;
+        frame.readBytes = d.ioStats.bytes;
+        frame.motion = 0;
+        frame.dc = 0;
+        frame.idct = 0;
         d.writeIndex = (d.writeIndex + 1) % Decoder::QueueCapacity;
         if (status == S_OK)
         {
@@ -214,16 +292,21 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
             LeaveCriticalSection(&d.queueStats);
         }
         ReleaseSemaphore(d.ready, 1, NULL);
-        // No consumer runs until the initial queue is full or the stream ends.
-        if (++initialFrames == Decoder::QueueCapacity || status != S_OK)
+        if (!primed)
+            ++initialFrames;
+        if (status != S_OK)
             SetEvent(d.primed);
         if (status != S_OK)
+        {
+            if (d.audio)
+                d.audio->Finish();
             break;
+        }
     }
     return 0;
 }
 
-HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
+HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool audioMaster)
 {
     Decoder& d = *m_decoder;
     const DWORD wait = WaitForSingleObject(d.ready, timeout);
@@ -236,6 +319,10 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
     m_parseTicks = frame.parseTicks;
     m_readTicks = frame.readTicks;
     m_inputWaitTicks = frame.inputWaitTicks;
+    m_audioWorkTicks = frame.audioWorkTicks;
+    m_videoPacketHighWater = frame.videoPacketHighWater;
+    m_motionTicks = frame.motionTicks;
+    m_idctTicks = frame.idctTicks;
     m_worstReadTicks = frame.worstReadTicks;
     m_readCalls = frame.readCalls;
     m_readBytes = frame.readBytes;
@@ -249,19 +336,25 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout)
         --d.queuedFrames;
         LeaveCriticalSection(&d.queueStats);
         m_lastDecodeTicks = frame.decodeTicks;
+        m_lastDecodeCpuMs = frame.decodeCpuMs;
         m_lastCopyTicks = frame.copyTicks;
         const unsigned luma = frame.width * frame.height;
         const unsigned chroma = ((frame.width + 1) / 2) * ((frame.height + 1) / 2);
         const BYTE* planes[] = {frame.pixels, frame.pixels + luma, frame.pixels + luma + chroma};
-        hr = LoadPlanes(device, frame.width, frame.height, planes, frame.width);
+        const double late = -m_untilNext;
+        const bool drop = audioMaster && late >= frame.duration;
+        if (!drop)
+            hr = LoadPlanes(device, frame.width, frame.height, planes, frame.width);
         if (SUCCEEDED(hr))
         {
-            ++m_framesReady;
-            const double late = -m_untilNext;
+            if (!drop)
+                ++m_framesReady;
+            else
+                ++m_audioSyncDrops;
             if (late > m_maxLate) m_maxLate = late;
             if (late >= frame.duration) ++m_lateByFrame;
             m_untilNext += frame.duration;
-            if (m_untilNext < 0) m_untilNext = 0;
+            if (!audioMaster && m_untilNext < 0) m_untilNext = 0;
         }
     }
     d.readIndex = (d.readIndex + 1) % Decoder::QueueCapacity;
@@ -302,79 +395,13 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
     }
     m_decoder->file = file;
     InitializeCriticalSection(&m_decoder->queueStats);
-    FILE* ram = fopen("game:\\mpeg2-ram.enable", "rb");
-    if (ram)
-    {
-        fclose(ram);
-        const int limit = 64 * 1024 * 1024;
-        DWORD sizeHigh = 0;
-        const DWORD bytes = GetFileSize(file, &sizeHigh);
-        if (!bytes || sizeHigh || bytes > limit)
-        {
-            CloseDecoder();
-            return E_INVALIDARG;
-        }
-        m_decoder->preload = (BYTE*)malloc(bytes);
-        if (!m_decoder->preload)
-        {
-            CloseDecoder();
-            return E_OUTOFMEMORY;
-        }
-        DWORD received = 0;
-        if (!ReadFile(file, m_decoder->preload, bytes, &received, NULL) || received != bytes)
-        {
-            CloseDecoder();
-            return E_FAIL;
-        }
-        m_decoder->preloadSize = bytes;
-    }
-    mpeg2_accel(0);
-    m_decoder->handle = mpeg2_init();
-    if (!m_decoder->handle)
-    {
-        CloseDecoder();
-        return E_OUTOFMEMORY;
-    }
-    // Default to the console-tested VMX combination. Keep a scalar escape hatch.
-    FILE* scalar = fopen("game:\\mpeg2-scalar.enable", "rb");
-    if (scalar)
-    {
-        fclose(scalar);
-        m_decodeMode = "MPEG-2 scalar override detected";
-    }
-    else
-    {
-        const unsigned motion = dvd360_mpeg2_enable_vmx() ? 1 : 0;
-        const unsigned dc = dvd360_mpeg2_enable_vmx_dc() ? 2 : 0;
-        const unsigned idct = dvd360_mpeg2_enable_vmx_idct() ? 4 : 0;
-        static const char* const modes[] = {
-            "MPEG-2 VMX default: no self-tests passed",
-            "MPEG-2 VMX default: motion",
-            "MPEG-2 VMX default: DC",
-            "MPEG-2 VMX default: motion + DC",
-            "MPEG-2 VMX default: IDCT",
-            "MPEG-2 VMX default: motion + IDCT",
-            "MPEG-2 VMX default: DC + IDCT",
-            "MPEG-2 VMX default: motion + DC + IDCT"
-        };
-        m_decodeMode = modes[motion | dc | idct];
-    }
-    const BYTE end[] = {0, 0, 1, 0xB7, 0, 0, 1, 0xB7};
-    memcpy(m_decoder->end, end, sizeof(end));
     m_decoder->stop = CreateEvent(NULL, TRUE, FALSE, NULL);
     const LONG capacity = Decoder::QueueCapacity;
     m_decoder->freeSlots = CreateSemaphore(NULL, capacity, capacity, NULL);
     m_decoder->ready = CreateSemaphore(NULL, 0, capacity, NULL);
     m_decoder->primed = CreateEvent(NULL, TRUE, FALSE, NULL);
-    m_decoder->inputFree = CreateSemaphore(NULL, Decoder::InputSlots, Decoder::InputSlots, NULL);
-    m_decoder->inputReady = CreateSemaphore(NULL, 0, Decoder::InputSlots, NULL);
     if (m_decoder->stop && m_decoder->freeSlots && m_decoder->ready && m_decoder->primed)
-    {
-        if (!m_decoder->preload && m_decoder->inputFree && m_decoder->inputReady)
-            m_decoder->reader = CreateThread(NULL, 0, ReadWorker, m_decoder, 0, NULL);
-        if (m_decoder->preload || m_decoder->reader)
-            m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
-    }
+        m_decoder->thread = CreateThread(NULL, 0, DecodeWorker, this, 0, NULL);
     HRESULT hr = E_FAIL;
     if (m_decoder->thread)
     {
@@ -387,18 +414,35 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device, HANDLE file)
     return hr == S_FALSE ? E_FAIL : hr;
 }
 
-HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed)
+HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed, bool audioMaster)
 {
     if (!m_decoder)
         return S_OK;
+    if (m_decoder->videoEnded)
+    {
+        if (m_decoder->audio && m_decoder->audio->IsPlaying())
+            return S_OK;
+        CloseDecoder();
+        return S_FALSE;
+    }
     m_untilNext -= elapsed;
     if (m_untilNext > 0)
         return S_OK;
-    const HRESULT hr = Consume(device, 0);
+    HRESULT hr;
+    unsigned remaining = Decoder::QueueCapacity;
+    do
+    {
+        hr = Consume(device, 0, audioMaster);
+    } while (audioMaster && hr == S_OK && m_untilNext <= 0 && --remaining);
     if (hr == E_PENDING)
     {
         ++m_underruns;
         return S_OK; // Hold the previous frame and retry at the next refresh.
+    }
+    if (hr == S_FALSE && m_decoder->audio && m_decoder->audio->IsPlaying())
+    {
+        m_decoder->videoEnded = true;
+        return S_OK;
     }
     if (hr != S_OK)
         CloseDecoder();
@@ -414,6 +458,12 @@ double DvdFrameProbe::ReadMilliseconds() const
 { return m_parseFrequency ? m_readTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::InputWaitMilliseconds() const
 { return m_parseFrequency ? m_inputWaitTicks * 1000.0 / m_parseFrequency : 0.0; }
+
+double DvdFrameProbe::MotionEstimateMilliseconds() const
+{ return m_parseFrequency ? m_motionTicks * 1000.0 / m_parseFrequency : 0.0; }
+
+double DvdFrameProbe::IdctEstimateMilliseconds() const
+{ return m_parseFrequency ? m_idctTicks * 1000.0 / m_parseFrequency : 0.0; }
 unsigned DvdFrameProbe::QueueDepth() const
 {
     if (!m_decoder)
@@ -436,123 +486,188 @@ double DvdFrameProbe::GpuWaitMilliseconds() const
 
 HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
 {
-    Decoder& stream = *m_decoder;
-    mpeg2dec_t* decoder = stream.handle;
-    const mpeg2_info_t* info = mpeg2_info(decoder);
-    for (unsigned steps = 0; steps < 8192; ++steps)
+    Decoder& d = *m_decoder;
+    if (!d.codec)
     {
-        LARGE_INTEGER start, finish;
-        QueryPerformanceCounter(&start);
-        const mpeg2_state_t state = mpeg2_parse(decoder);
-        QueryPerformanceCounter(&finish);
-        stream.parseTicks += finish.QuadPart - start.QuadPart;
-        ++stream.calls;
-        if (state == STATE_BUFFER)
+        d.io = CreateFfmpegFileIo(d.file, &d.ioStats);
+        d.format = d.io ? avformat_alloc_context() : NULL;
+        if (!d.format)
+            return E_OUTOFMEMORY;
+        d.format->pb = d.io;
+        d.format->flags |= AVFMT_FLAG_CUSTOM_IO;
+        if (avformat_open_input(&d.format, NULL, NULL, NULL) < 0 ||
+            avformat_find_stream_info(d.format, NULL) < 0)
+            return E_FAIL;
+        const AVCodec* codec = NULL;
+        d.video = av_find_best_stream(d.format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+        if (d.video < 0 || !codec || codec->id != AV_CODEC_ID_MPEG2VIDEO)
+            return E_INVALIDARG;
+        d.codec = avcodec_alloc_context3(codec);
+        d.decoded = av_frame_alloc();
+        d.packet = av_packet_alloc();
+        if (!d.codec || !d.decoded || !d.packet)
+            return E_OUTOFMEMORY;
+        AVStream* video = d.format->streams[d.video];
+        d.frameRate = av_q2d(av_guess_frame_rate(d.format, video, NULL));
+        // Target 750 ms of compressed video. Use the mux rate as an upper
+        // estimate if the video rate is unknown, then fall back to 6 Mb/s.
+        const int64_t bitrate = video->codecpar->bit_rate > 0 ? video->codecpar->bit_rate :
+            d.format->bit_rate > 0 ? d.format->bit_rate : 6000000;
+        MEMORYSTATUS memory = {};
+        memory.dwLength = sizeof(memory);
+        GlobalMemoryStatus(&memory);
+        const unsigned ramBudget = memory.dwAvailPhys / 32;
+        d.packetBudget = ramBudget < Decoder::PacketByteBudget ? ramBudget : Decoder::PacketByteBudget;
+        const double target = bitrate * (0.75 / 8.0);
+        d.startupVideoBytes = target < d.packetBudget ? static_cast<unsigned>(target) : d.packetBudget;
+        if (avcodec_parameters_to_context(d.codec, video->codecpar) < 0)
+            return E_FAIL;
+        d.codec->pkt_timebase = video->time_base;
+        d.codec->thread_count = 1;
+#ifdef DVD360_FFMPEG_ALTIVEC
+        d.codec->idct_algo = FF_IDCT_ALTIVEC;
+        m_decodeMode = "FFmpeg MPEG-2 (AltiVec and Xenon IDCT)";
+        FILE* scalarIdct = fopen("game:\\ffmpeg-scalar-idct.enable", "rb");
+        if (scalarIdct)
         {
-            if (stream.flushed)
-                return S_FALSE;
-            if (stream.preload)
-            {
-                if (!stream.preloadFed)
-                {
-                    stream.preloadFed = true;
-                    mpeg2_buffer(decoder, stream.preload, stream.preload + stream.preloadSize);
-                }
-                else
-                {
-                    stream.flushed = true;
-                    mpeg2_buffer(decoder, stream.end, stream.end + sizeof(stream.end));
-                }
-                continue;
-            }
-            // libmpeg2 owns the previous input pointer until STATE_BUFFER.
-            if (stream.inputHeld)
-            {
-                stream.inputHeld = false;
-                stream.inputIndex = (stream.inputIndex + 1) % Decoder::InputSlots;
-                ReleaseSemaphore(stream.inputFree, 1, NULL);
-            }
-            HANDLE wait[] = {stream.stop, stream.inputReady};
-            DWORD available = WaitForMultipleObjects(2, wait, FALSE, 0);
-            if (available == WAIT_TIMEOUT)
-            {
-                QueryPerformanceCounter(&start);
-                available = WaitForMultipleObjects(2, wait, FALSE, INFINITE);
-                QueryPerformanceCounter(&finish);
-                stream.inputWaitTicks += finish.QuadPart - start.QuadPart;
-            }
-            if (available != WAIT_OBJECT_0 + 1)
-                return E_FAIL;
-            const Decoder::InputChunk& chunk = stream.input[stream.inputIndex];
-            stream.readTicks += chunk.ticks;
-            ++stream.readCalls;
-            stream.readBytes += (unsigned)chunk.size;
-            if (chunk.ticks > stream.worstReadTicks)
-                stream.worstReadTicks = chunk.ticks;
-            stream.inputHeld = true;
-            if (chunk.failed)
-                return E_FAIL;
-            if (chunk.size)
-            {
-                BYTE* bytes = stream.input[stream.inputIndex].bytes;
-                mpeg2_buffer(decoder, bytes, bytes + chunk.size);
-            }
-            else
-            {
-                stream.flushed = true;
-                mpeg2_buffer(decoder, stream.end, stream.end + sizeof(stream.end));
-            }
+            fclose(scalarIdct);
+            d.codec->idct_algo = FF_IDCT_SIMPLE;
+            m_decodeMode = "FFmpeg MPEG-2 (AltiVec, scalar IDCT)";
         }
-        else if (state == STATE_SEQUENCE || state == STATE_SEQUENCE_REPEATED ||
-                 state == STATE_SEQUENCE_MODIFIED)
+#endif
+        if (avcodec_open2(d.codec, codec, NULL) < 0)
+            return E_FAIL;
+        const AVCodec* audioCodec = NULL;
+        d.audioStream = av_find_best_stream(d.format, AVMEDIA_TYPE_AUDIO,
+                                            -1, d.video, &audioCodec, 0);
+        if (d.audioStream >= 0 && audioCodec)
         {
-            const mpeg2_sequence_t* seq = info->sequence;
-            if (!seq || !seq->picture_width || !seq->picture_height ||
-                seq->width > 720 || seq->height > 576 ||
-                seq->chroma_width * 2 != seq->width || seq->chroma_height * 2 != seq->height)
+            d.audio = new FfmpegAudio();
+            if (d.audio && FAILED(d.audio->Open(*d.format->streams[d.audioStream])))
             {
-                return E_INVALIDARG;
+                delete d.audio;
+                d.audio = NULL;
             }
-        }
-        else if ((state == STATE_SLICE || state == STATE_END) &&
-                 info->display_fbuf && info->display_picture && info->sequence)
-        {
-            const mpeg2_sequence_t* seq = info->sequence;
-            const BYTE* planes[] = {info->display_fbuf->buf[0],
-                                    info->display_fbuf->buf[1],
-                                    info->display_fbuf->buf[2]};
-            // libmpeg2 frame periods use a 27 MHz clock; nb_fields includes repeats.
-            frame.duration = seq->frame_period && info->display_picture->nb_fields
-                ? seq->frame_period * (double)info->display_picture->nb_fields / 54000000.0
-                : 1.0 / 25.0;
-            frame.width = seq->picture_width;
-            frame.height = seq->picture_height;
-            LARGE_INTEGER copyStart, copyEnd;
-            QueryPerformanceCounter(&copyStart);
-            BYTE* dest = frame.pixels;
-            for (unsigned i = 0; i < 3; ++i)
-            {
-                const unsigned width = i ? (frame.width + 1) / 2 : frame.width;
-                const unsigned height = i ? (frame.height + 1) / 2 : frame.height;
-                const unsigned stride = i ? seq->chroma_width : seq->width;
-                if (stride == width)
-                {
-                    const unsigned planeBytes = width * height;
-                    memcpy(dest, planes[i], planeBytes);
-                    dest += planeBytes;
-                }
-                else
-                {
-                    for (unsigned row = 0; row < height; ++row, dest += width)
-                        memcpy(dest, planes[i] + row * stride, width);
-                }
-            }
-            QueryPerformanceCounter(&copyEnd);
-            frame.copyTicks = copyEnd.QuadPart - copyStart.QuadPart;
-            return S_OK;
         }
     }
-    return E_FAIL;
+
+    for (;;)
+    {
+        if (WaitForSingleObject(d.stop, 0) == WAIT_OBJECT_0)
+            return E_ABORT;
+        LARGE_INTEGER start, end;
+        QueryPerformanceCounter(&start);
+        const int status = avcodec_receive_frame(d.codec, d.decoded);
+        QueryPerformanceCounter(&end);
+        d.parseTicks += end.QuadPart - start.QuadPart;
+        ++d.calls;
+        if (status == AVERROR_EOF)
+            return S_FALSE;
+        if (status == 0)
+            break;
+        if (status != AVERROR(EAGAIN) || d.flushed)
+            return E_FAIL;
+
+        if (d.packetCount)
+        {
+            AVPacket* packet = &d.pendingVideo[d.packetHead];
+            QueryPerformanceCounter(&start);
+            const int sent = avcodec_send_packet(d.codec, packet);
+            QueryPerformanceCounter(&end);
+            d.parseTicks += end.QuadPart - start.QuadPart;
+            d.packetBytes -= packet->size;
+            av_packet_unref(packet);
+            d.packetHead = (d.packetHead + 1) % Decoder::PacketCapacity;
+            --d.packetCount;
+            if (sent < 0)
+                return E_FAIL;
+        }
+        else if (!d.demuxEnd)
+            d.PumpPacket();
+        else if (d.demuxEnd == AVERROR_EOF)
+        {
+            d.flushed = true;
+            const int flush = avcodec_send_packet(d.codec, NULL);
+            if (flush < 0)
+                return flush == AVERROR_EOF ? S_FALSE : E_FAIL;
+        }
+        else
+            return E_FAIL;
+    }
+
+    const AVFrame& decoded = *d.decoded;
+    if (decoded.format != AV_PIX_FMT_YUV420P ||
+        decoded.width <= 0 || decoded.width > int(kWidth) ||
+        decoded.height <= 0 || decoded.height > int(kHeight))
+        return E_INVALIDARG;
+    frame.width = decoded.width;
+    frame.height = decoded.height;
+    AVStream* video = d.format->streams[d.video];
+    const double rate = d.frameRate;
+    frame.duration = decoded.duration > 0
+        ? decoded.duration * av_q2d(video->time_base)
+        : (1.0 + decoded.repeat_pict * 0.5) / (rate > 0 ? rate : 25.0);
+
+    LARGE_INTEGER start, end;
+    QueryPerformanceCounter(&start);
+    BYTE* dest = frame.pixels;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        const unsigned width = i ? (frame.width + 1) / 2 : frame.width;
+        const unsigned height = i ? (frame.height + 1) / 2 : frame.height;
+        const BYTE* source = decoded.data[i];
+        if (decoded.linesize[i] == int(width))
+        {
+            memcpy(dest, source, width * height);
+            dest += width * height;
+        }
+        else
+            for (unsigned row = 0; row < height; ++row, dest += width)
+                memcpy(dest, source + int(row) * decoded.linesize[i], width);
+    }
+    av_frame_unref(d.decoded);
+    QueryPerformanceCounter(&end);
+    frame.copyTicks = end.QuadPart - start.QuadPart;
+    return S_OK;
+}
+
+HRESULT DvdFrameProbe::StartEmbeddedAudio()
+{
+    return m_decoder && m_decoder->audio ? m_decoder->audio->Start() : S_FALSE;
+}
+
+double DvdFrameProbe::AdvanceEmbeddedAudio(double fallback)
+{
+    return m_decoder && m_decoder->audio
+        ? m_decoder->audio->Advance(fallback, QueueDepth() == Decoder::QueueCapacity)
+        : fallback;
+}
+
+unsigned DvdFrameProbe::AudioRecoveryTicks() const
+{
+    return m_decoder && m_decoder->audio ? m_decoder->audio->RecoveryTicks() : 0;
+}
+
+double DvdFrameProbe::AudioWorkMilliseconds() const
+{
+    return m_parseFrequency ? m_audioWorkTicks * 1000.0 / m_parseFrequency : 0.0;
+}
+
+void DvdFrameProbe::StartupVideoBuffer(unsigned& queued, unsigned& target, unsigned& budget) const
+{
+    queued = m_decoder ? m_decoder->primedVideoBytes : 0;
+    target = m_decoder ? m_decoder->startupVideoBytes : 0;
+    budget = m_decoder ? m_decoder->packetBudget : 0;
+}
+
+bool DvdFrameProbe::EmbeddedAudioState(double& milliseconds, unsigned& buffers) const
+{
+    if (!m_decoder || !m_decoder->audio)
+        return false;
+    UINT64 samples;
+    m_decoder->audio->GetPlaybackState(samples, buffers);
+    milliseconds = samples * (1000.0 / 48000.0);
+    return true;
 }
 
 HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsigned height,

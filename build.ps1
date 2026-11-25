@@ -1,7 +1,9 @@
 param(
     [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
     [string]$RxdkRoot = 'C:\Program Files\RXDK-360',
-    [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
+    [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe',
+    [switch]$FfmpegProbe,
+    [switch]$FfmpegAltivec
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +13,9 @@ $clang = Join-Path $clangRoot 'bin\clang.exe'
 $ar = Join-Path $clangRoot 'bin\llvm-ar.exe'
 $rxdkLib = Join-Path $RxdkRoot 'lib\xbox'
 $output = Join-Path $PSScriptRoot "build\$Configuration"
+if ($FfmpegAltivec) {
+    $output = Join-Path $PSScriptRoot "build\$Configuration-altivec"
+}
 $libraryProject = Join-Path $PSScriptRoot '360DVD-libs.vcxproj'
 $dvdLibrary = Join-Path $PSScriptRoot 'build\libdvd360.a'
 $runtime = Join-Path $PSScriptRoot "build\runtime"
@@ -18,6 +23,18 @@ $helperObjects = Join-Path $runtime 'helper-objects'
 $helperLib = Join-Path $runtime 'xdk-compiler-helpers.lib'
 $project = Join-Path $PSScriptRoot '360DVD.vcxproj'
 $deviceSource = Join-Path $PSScriptRoot 'build\obj\libs\device_xbox360.c'
+$ffmpegBuild = Join-Path $PSScriptRoot 'build\ffmpeg-rxdk'
+if ($FfmpegAltivec) {
+    $ffmpegBuild += '-altivec'
+}
+foreach ($lib in 'avformat', 'avcodec', 'swresample', 'avutil') {
+    if (-not (Test-Path "$ffmpegBuild\lib$lib\lib$lib.a")) {
+        throw 'Build FFmpeg from WSL first; see docs/ffmpeg-rxdk.md.'
+    }
+}
+$ffmpegProperties = @("/p:FfmpegBuildDir=$ffmpegBuild",
+    "/p:FfmpegSourceDir=$(Join-Path $PSScriptRoot 'deps\ffmpeg')", "/p:FfmpegProbe=$FfmpegProbe",
+    "/p:FfmpegAltivec=$FfmpegAltivec")
 
 foreach ($tool in @($MSBuild, $clang, $ar)) {
     if (-not (Test-Path $tool)) { throw "Required build tool not found: $tool" }
@@ -70,37 +87,6 @@ $null = New-Item -ItemType Directory -Force (Split-Path $deviceSource)
 [IO.File]::WriteAllText($deviceSource,
     $deviceText.Replace($oldSeek, $newSeek).Replace($oldStreamIoctls, $newStreamIoctls))
 
-# Keep libmpeg2's row transform, scan layout, clipping and DC shortcut.
-$idctText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'deps\libmpeg2\libmpeg2\idct.c'))
-$columnLoop = 'for \(i = 0; i < 8; i\+\+\)\s+idct_col \(block \+ i\);'
-if ([regex]::Matches($idctText, $columnLoop).Count -ne 2) {
-    throw 'Recheck the Xbox IDCT column hook against the pinned source.'
-}
-$idctText = [regex]::Replace($idctText, $columnLoop, 'dvd360_idct_columns(block); i = 8;')
-$columnHook = @'
-void (*dvd360_idct_columns_vmx)(int16_t *);
-
-void dvd360_idct_columns_scalar(int16_t *block)
-{
-    for (int i = 0; i < 8; ++i)
-        idct_col(block + i);
-}
-
-static void dvd360_idct_columns(int16_t *block)
-{
-    if (dvd360_idct_columns_vmx && !((uintptr_t)block & 15))
-        dvd360_idct_columns_vmx(block);
-    else
-        dvd360_idct_columns_scalar(block);
-}
-
-'@
-$anchor = 'static void mpeg2_idct_copy_c'
-if ([regex]::Matches($idctText, $anchor).Count -ne 1) {
-    throw 'Recheck the Xbox IDCT column hook insertion point.'
-}
-[IO.File]::WriteAllText((Join-Path (Split-Path $deviceSource) 'idct_xbox360.c'),
-    $idctText.Replace($anchor, $columnHook + "`n" + $anchor))
 & $MSBuild $libraryProject /t:ClCompile /nologo /v:minimal `
     '/p:Configuration=Release' '/p:Platform=Xbox 360' `
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `
@@ -125,9 +111,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not create RXDK Clang ABI helper archive
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `
     "/p:RxdkLibcDir=$runtime" "/p:RxdkHelperLib=$helperLib" `
     "/p:DvdLibraries=$dvdLibrary" `
+    @ffmpegProperties `
     "/p:OutDir=$output\" "/p:IntDir=$(Join-Path $PSScriptRoot "build\obj\$Configuration")\"
 if ($LASTEXITCODE -ne 0) {
     throw "360DVD build failed with exit code $LASTEXITCODE"
 }
 
-Write-Host "Built: build\$Configuration\360DVD.xex"
+Write-Host "Built: $(Join-Path $output '360DVD.xex')"

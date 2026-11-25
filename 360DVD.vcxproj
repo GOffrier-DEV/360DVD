@@ -101,6 +101,25 @@
       <SetChecksum>true</SetChecksum>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(FfmpegBuildDir)' != ''">
+    <ClCompile>
+      <PreprocessorDefinitions Condition="'$(FfmpegProbe)' == 'True'">DVD360_FFMPEG_PROBE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(FfmpegBuildDir);$(FfmpegSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(FfmpegBuildDir)' != ''">
+    <ClCompile Include="src\FfmpegFileIo.cpp" />
+    <ClCompile Include="src\FfmpegAudio.cpp" />
+    <ClCompile Include="src\FfmpegVobProbe.cpp" Condition="'$(FfmpegProbe)' == 'True'" />
+  </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(FfmpegAltivec)' == 'True'">
+    <ClCompile>
+      <PreprocessorDefinitions>DVD360_FFMPEG_ALTIVEC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
       <CompileAs>CompileAsCpp</CompileAs>

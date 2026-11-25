@@ -329,11 +329,13 @@ namespace
     struct PacingSample
     {
         unsigned frame, presented, missed, underruns;
-        unsigned queueBefore, queueAfter;
+        unsigned queueBefore, queueAfter, audioBuffers, videoDropped, audioRecovery;
         float interval, advance, draw, present;
         double decode, copy, audio, audioAtPresent;
         bool audioMaster;
         double parse, read, upload, gpuWait;
+        double demux, audioWork;
+        double decodeCpu;
         unsigned int advanceStatus, presentStatus;
         bool drewVideo;
     };
@@ -355,7 +357,8 @@ namespace
 
     void WritePacingTrace(unsigned count, unsigned omitted)
     {
-        HANDLE file = CreateFileA("game:\\360DVD-pacing.csv", GENERIC_WRITE, FILE_SHARE_READ,
+        HANDLE file = CreateFileA("game:\\360DVD-pacing.csv",
+                                  GENERIC_WRITE, FILE_SHARE_READ,
                                   NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (file == INVALID_HANDLE_VALUE)
         {
@@ -364,25 +367,32 @@ namespace
         }
         static char buffer[16384];
         const char header[] = "refresh,ready,presented,missed,underruns,interval_ms,advance_ms,"
-                      "draw_ms,present_ms,parse_ms,read_ms,upload_ms,gpu_wait_ms,"
+                      "draw_ms,present_ms,video_codec_ms,readfile_ms,upload_ms,gpu_wait_ms,"
                       "advance_status,present_status,drew_video,queue_before,queue_after,"
-                       "decode_frame_ms,frame_copy_ms,audio_ms,audio_master,audio_present_ms\n";
+                        "decode_frame_ms,frame_copy_ms,audio_ms,audio_master,audio_present_ms,"
+                         "demux_ms_including_readfile,decode_cpu_ms,audio_buffers,video_expired,audio_recovery_ticks,audio_work_ms\n";
         bool ok = WriteTraceBytes(file, header, sizeof(header) - 1);
         DWORD used = 0;
         double priorParse = 0, priorRead = 0, priorUpload = 0, priorWait = 0;
+        double priorDemux = 0, priorAudioWork = 0;
         for (unsigned i = 0; ok && i < count; ++i)
         {
             const PacingSample& s = pacingTrace[i];
             char row[512];
             const int length = sprintf_s(row, sizeof(row), "%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,"
-                          "%.3f,%.3f,%.3f,%.3f,%08X,%08X,%u,%u,%u,%.3f,%.3f,%.3f,%u,%.3f\n",
+                          "%.3f,%.3f,%.3f,%.3f,%08X,%08X,%u,%u,%u,%.3f,%.3f,%.3f,%u,%.3f,"
+                           "%.3f,%.3f,%u,%u,%u,%.3f\n",
                     i + 1, s.frame, s.presented, s.missed, s.underruns,
                     s.interval, s.advance, s.draw, s.present,
                     s.parse - priorParse, s.read - priorRead,
                     s.upload - priorUpload, s.gpuWait - priorWait,
                     s.advanceStatus, s.presentStatus, (unsigned)s.drewVideo,
                      s.queueBefore, s.queueAfter, s.decode, s.copy, s.audio,
-                     (unsigned)s.audioMaster, s.audioAtPresent);
+                       (unsigned)s.audioMaster, s.audioAtPresent, s.demux - priorDemux,
+                       s.decodeCpu, s.audioBuffers, s.videoDropped, s.audioRecovery,
+                       s.audioWork - priorAudioWork);
+            priorDemux = s.demux;
+            priorAudioWork = s.audioWork;
             if (length <= 0)
             {
                 ok = false;
@@ -499,11 +509,15 @@ namespace
         BootLog("DVD logo rendering");
         DvdFrameProbe frame;
         bool showFrame = false;
-        HANDLE fixture = CreateFileA("game:\\mpeg2-probe.m2v", GENERIC_READ,
+        HANDLE fixture = CreateFileA("game:\\dvd-video.vob", GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        const bool vob = fixture != INVALID_HANDLE_VALUE;
+        if (!vob)
+            fixture = CreateFileA("game:\\mpeg2-probe.m2v", GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         const DWORD openError = fixture == INVALID_HANDLE_VALUE ? GetLastError() : 0;
         const bool compressed = fixture != INVALID_HANDLE_VALUE;
-        FILE* readOnly = compressed ? fopen("game:\\mpeg2-readbench.enable", "rb") : NULL;
+        FILE* readOnly = compressed && !vob ? fopen("game:\\mpeg2-readbench.enable", "rb") : NULL;
         if (readOnly)
         {
             fclose(readOnly);
@@ -528,15 +542,23 @@ namespace
             showFrame = SUCCEEDED(frameStatus);
             if (compressed)
                 BootLog(frame.DecodeMode());
+                unsigned queued, target, budget;
+                frame.StartupVideoBuffer(queued, target, budget);
+                char startup[128];
+                sprintf_s(startup, sizeof(startup),
+                          "Startup video bytes: queued=%u target=%u budget=%u",
+                          queued, target, budget);
+                BootLog(startup);
             BootLog(compressed ? (showFrame ? "CPU MPEG-2 frame ready" : "CPU MPEG-2 probe failed")
                                : (showFrame ? "YUV test frame ready" : "YUV test frame failed"),
                     frameStatus);
         }
         ProbeAudio audio;
-        const HRESULT audioOpen = showFrame && compressed ? audio.Open() : S_FALSE;
+        const HRESULT audioOpen = showFrame && compressed && !vob ? audio.Open() : S_FALSE;
         if (FAILED(audioOpen))
             BootLog("PCM fixture unavailable; using performance counter", audioOpen);
         bool audioMaster = false;
+        bool embeddedAudio = false;
         // Keep synchronous optical I/O off the render thread.
         ProbeLog("starting probe thread");
         HANDLE probeThread = CreateThread(NULL, 0, ProbeDvd, NULL, 0, NULL);
@@ -556,6 +578,9 @@ namespace
         bool capture = showFrame && compressed;
         bool playbackClockStarted = false;
         const double ticksToMs = 1000.0 / frequency.QuadPart;
+        char audioStartLog[96] = {};
+        HRESULT audioStartStatus = S_OK;
+        bool pcmDrained = false;
 
         for (;;)
         {
@@ -573,13 +598,14 @@ namespace
             {
                 const unsigned before = frame.FramesReady();
                 bool drained = false;
-                const double videoElapsed = audioMaster ? audio.Advance(drained) : elapsed;
-                const HRESULT status = frame.Advance(device, videoElapsed);
+                const double videoElapsed = embeddedAudio ? frame.AdvanceEmbeddedAudio(elapsed)
+                    : audioMaster ? audio.Advance(drained) : elapsed;
+                const HRESULT status = frame.Advance(device, videoElapsed, embeddedAudio || audioMaster);
                 if (drained)
                 {
                     audioMaster = false;
                     audio.Close();
-                    BootLog("PCM drained; continuing on performance counter");
+                    pcmDrained = true;
                 }
                 advanceStatus = status;
                 if (frame.FramesReady() != before && lastPresented != before)
@@ -614,20 +640,45 @@ namespace
             QueryPerformanceCounter(&presentStart);
             const HRESULT presentStatus = device->Present(NULL, NULL, NULL, NULL);
             QueryPerformanceCounter(&presentEnd);
-            const double audioAtPresent = capture && audioMaster && drewVideo && SUCCEEDED(presentStatus)
-                ? audio.PresentedMilliseconds() : -1.0;
+            double embeddedMs = -1.0;
+            unsigned audioBuffers = 0;
+            if (capture && embeddedAudio)
+                frame.EmbeddedAudioState(embeddedMs, audioBuffers);
+            const double audioAtPresent = capture && drewVideo && SUCCEEDED(presentStatus)
+                ? (embeddedAudio ? embeddedMs : audioMaster ? audio.PresentedMilliseconds() : -1.0)
+                : -1.0;
             presentTicks += presentEnd.QuadPart - presentStart.QuadPart;
             if (compressed && drewVideo && SUCCEEDED(presentStatus) && !playbackClockStarted)
             {
                 // Keep startup Present in the trace, but out of the video timeline.
                 previous = presentEnd;
                 playbackClockStarted = true;
-                if (audioOpen == S_OK)
+                if (vob)
+                {
+                    const HRESULT started = frame.StartEmbeddedAudio();
+                    audioStartStatus = started;
+                    embeddedAudio = started == S_OK;
+                    if (embeddedAudio)
+                    {
+                        double audioMs = 0;
+                        unsigned buffers = 0;
+                        frame.EmbeddedAudioState(audioMs, buffers);
+                        sprintf_s(audioStartLog, sizeof(audioStartLog),
+                                  "VOB audio: XAudio2 started (queued=%u)", buffers);
+                    }
+                    else
+                        strcpy_s(audioStartLog, sizeof(audioStartLog),
+                                 started == S_FALSE ? "VOB audio: no usable track" :
+                                 "VOB audio: XAudio2 start failed");
+                }
+                else if (audioOpen == S_OK)
                 {
                     const HRESULT started = audio.Start();
                     audioMaster = SUCCEEDED(started);
-                    BootLog(audioMaster ? "Playback clock: XAudio2 samples" :
-                            "PCM start failed; using performance counter", started);
+                    audioStartStatus = started;
+                    strcpy_s(audioStartLog, sizeof(audioStartLog),
+                             audioMaster ? "Playback clock: XAudio2 samples" :
+                             "PCM start failed; using performance counter");
                     if (!audioMaster)
                         audio.Close();
                 }
@@ -651,9 +702,13 @@ namespace
                     s.queueAfter = frame.QueueDepth();
                     const bool newFrame = traceCount == 1 || s.frame != frameBefore;
                     s.decode = newFrame ? frame.LastDecodeMilliseconds() : 0.0;
+                    s.decodeCpu = newFrame ? frame.LastDecodeCpuMilliseconds() : 0.0;
                     s.copy = newFrame ? frame.LastCopyMilliseconds() : 0.0;
-                    s.audio = audio.Milliseconds();
-                    s.audioMaster = audioMaster;
+                     s.audio = embeddedAudio ? embeddedMs : audio.Milliseconds();
+                     s.audioMaster = embeddedAudio || audioMaster;
+                     s.audioBuffers = audioBuffers;
+                     s.videoDropped = frame.AudioSyncDrops();
+                     s.audioRecovery = frame.AudioRecoveryTicks();
                     s.audioAtPresent = audioAtPresent;
                     s.interval = elapsed * 1000.0f;
                     s.advance = (float)((advanceEnd.QuadPart - now.QuadPart) * ticksToMs);
@@ -663,6 +718,8 @@ namespace
                     s.read = frame.ReadMilliseconds();
                     s.upload = frame.UploadMilliseconds();
                     s.gpuWait = frame.GpuWaitMilliseconds();
+                     s.demux = frame.InputWaitMilliseconds();
+                     s.audioWork = frame.AudioWorkMilliseconds();
                     s.advanceStatus = (unsigned)advanceStatus;
                     s.presentStatus = (unsigned)presentStatus;
                     s.drewVideo = drewVideo;
@@ -675,28 +732,34 @@ namespace
                 capture = false;
                 audio.Close();
                 audioMaster = false;
+                if (audioStartLog[0])
+                    BootLog(audioStartLog, audioStartStatus);
+                if (pcmDrained)
+                    BootLog("PCM drained; continuing on performance counter");
                 WritePacingTrace(traceCount, traceOmitted);
                 BootLog(FAILED(advanceStatus) ? "CPU MPEG-2 playback failed" :
                         "CPU MPEG-2 clip finished", FAILED(advanceStatus) ? advanceStatus : S_OK);
                 char stats[160];
+                sprintf_s(stats, sizeof(stats), "Playback summary: recovery=%u video_packet_peak=%u",
+                          frame.AudioRecoveryTicks(), frame.VideoPacketHighWater());
+                BootLog(stats);
                 sprintf_s(stats, sizeof(stats),
-                          "MPEG-2 pacing: ready=%u presented=%u missed=%u late>=frame=%u maxLate=%.2fms vmx=%u dc=%u idct=%u",
+                           "MPEG-2 pacing: ready=%u presented=%u missed=%u late>=frame=%u maxLate=%.2fms expired=%u",
                           frame.FramesReady(), presentedFrames, missedFrames,
                           frame.LateByFrame(), frame.MaxLateSeconds() * 1000.0,
-                          frame.MotionBlocks(), frame.DcBlocks(), frame.IdctBlocks());
+                           frame.AudioSyncDrops());
                 BootLog(stats);
                 sprintf_s(stats, sizeof(stats),
                           "MPEG-2 queue: underruns=%u read=%.2fms upload=%.2fms gpuWait=%.2fms present=%.2fms",
                           frame.Underruns(), frame.ReadMilliseconds(), frame.UploadMilliseconds(),
                           frame.GpuWaitMilliseconds(), presentTicks * 1000.0 / frequency.QuadPart);
                 BootLog(stats);
-                sprintf_s(stats, sizeof(stats), "MPEG-2 decoder input wait: %.2fms",
+                sprintf_s(stats, sizeof(stats), "FFmpeg demux (including ReadFile): %.2fms",
                           frame.InputWaitMilliseconds());
                 BootLog(stats);
                 const double parseMs = frame.ParseMilliseconds();
                 sprintf_s(stats, sizeof(stats),
-                          "MPEG-2 input: %s calls=%u bytes=%u request=128KiB worst=%.2fms",
-                          frame.ReadCalls() ? "ReadFile" : "RAM",
+                           "FFmpeg ReadFile: calls=%u bytes=%u worst=%.2fms",
                           frame.ReadCalls(), frame.ReadBytes(), frame.WorstReadMilliseconds());
                 BootLog(stats);
                 sprintf_s(stats, sizeof(stats),
@@ -715,5 +778,9 @@ namespace
 
 int main()
 {
+#ifdef DVD360_FFMPEG_PROBE
+    extern void RunFfmpegVobProbe();
+    RunFfmpegVobProbe();
+#endif
     return Run();
 }

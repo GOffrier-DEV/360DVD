@@ -128,6 +128,9 @@
     <ClCompile Include="src\main.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
+    <ClCompile Include="src\CdDiscScene.cpp">
+      <CompileAs>CompileAsCpp</CompileAs>
+    </ClCompile>
     <ClCompile Include="src\DvdFrameProbe.cpp" />
     <ClCompile Include="src\DvdLogoBounce.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
@@ -138,6 +141,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\DvdLogoBounce.h" />
+    <ClInclude Include="src\CdDiscScene.h" />
     <ClInclude Include="src\DvdFrameProbe.h" />
     <ClInclude Include="src\XboxDvdStream.h" />
   </ItemGroup>

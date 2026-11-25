@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "DvdLogoBounce.h"
+#include "CdDiscScene.h"
 #include "DvdFrameProbe.h"
 #include "PlaybackAffinity.h"
 #include "PlaybackOsd.h"
@@ -756,6 +757,7 @@ namespace
         const HRESULT discStatus = frame.DecodeMpeg2(device);
         const bool discPlayback = discStatus == S_OK;
         CdAudioPlayer cdAudio;
+        CdDiscScene cdScene;
         const bool cdPlayback = !discPlayback && cdAudio.Start();
         bool showFrame = discPlayback;
         bool compressed = discPlayback;
@@ -880,6 +882,7 @@ namespace
                 playbackEnded = capture;
                 showFrame = switchingAudio = embeddedAudio = false;
                 cdAudio.Stop();
+                cdScene.Reset();
                 frame.Stop();
                 animation.Center();
                 if (!osdReady)
@@ -1084,7 +1087,8 @@ namespace
                                              present.BackBufferHeight, displayMode);
                     }
                 }
-                else
+                else if (!cdAudio.HasDisc() ||
+                         !cdScene.Draw(device, !cdAudio.Paused(), elapsed))
                     animation.Render();
                 device->EndScene();
                 if (osdReady && noDisc)

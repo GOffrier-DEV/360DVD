@@ -11,16 +11,12 @@ builds remain reproducible until the submodules are explicitly advanced.
 | `deps/libdvdnav` | this repository, `libdvdnav-xbox` | `7.0.0-20-g32b765b` (reports 7.0.1) | GPL-2.0-or-later | yes |
 | `deps/libdvdcss` | https://code.videolan.org/videolan/libdvdcss | `1.6.0-7-g811ce97` | GPL-2.0-or-later | yes |
 | `deps/ffmpeg` | https://github.com/FFmpeg/FFmpeg | `n9.1` (`74e4393`) | LGPL-2.1-or-later | yes |
-| `deps/libmpeg2` | https://code.videolan.org/videolan/libmpeg2 | `946bf4b` | GPL-2.0-or-later | no |
 
 Initialize after cloning with `git submodule update --init --recursive`.
 Advance intentionally with `git submodule update --remote`; review the changed
 gitlinks and library changelogs before committing. Because the two DVD
 navigation libraries point at this repository, those branch names must remain
 published for a fresh checkout to initialize.
-
-`libmpeg2` is retained for reference. The 1.0 player no longer builds or
-links it; FFmpeg provides video decoding.
 
 ## Porting boundary
 

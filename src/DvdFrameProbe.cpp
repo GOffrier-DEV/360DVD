@@ -70,14 +70,12 @@ struct DvdFrameProbe::QueuedFrame
 {
     BYTE pixels[kWidth * kHeight * 3 / 2];
     unsigned width, height, calls;
-    unsigned motion, dc, idct;
     double duration;
     LONGLONG parseTicks, readTicks, inputWaitTicks;
     LONGLONG decodeTicks, copyTicks;
     LONGLONG audioWorkTicks;
     unsigned videoPacketHighWater;
     double decodeCpuMs;
-    LONGLONG motionTicks, idctTicks;
     LONGLONG worstReadTicks;
     unsigned readCalls, readBytes;
     HRESULT status;
@@ -324,7 +322,7 @@ DvdFrameProbe::DvdFrameProbe()
       m_audioWorkTicks(0), m_maxLate(0),
       m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
       m_readTicks(0), m_uploadTicks(0), m_gpuWaitTicks(0),
-      m_inputWaitTicks(0), m_motionTicks(0), m_idctTicks(0),
+      m_inputWaitTicks(0),
       m_lastDecodeTicks(0), m_lastCopyTicks(0),
       m_lastDecodeCpuMs(-1.0),
       m_worstReadTicks(0), m_readCalls(0), m_readBytes(0),
@@ -334,7 +332,6 @@ DvdFrameProbe::DvdFrameProbe()
 #else
       m_decodeMode("FFmpeg MPEG-2 (scalar)"),
 #endif
-      m_motionBlocks(0), m_dcBlocks(0), m_idctBlocks(0),
       m_vs(NULL), m_ps(NULL), m_decl(NULL)
 {
     memset(m_planes, 0, sizeof(m_planes));
@@ -563,13 +560,9 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
         frame.inputWaitTicks = d.inputWaitTicks;
         frame.audioWorkTicks = d.audioWorkTicks;
         frame.videoPacketHighWater = d.packetHighWater;
-        frame.motionTicks = frame.idctTicks = 0;
         frame.worstReadTicks = d.ioStats.worstTicks;
         frame.readCalls = d.ioStats.calls;
         frame.readBytes = d.ioStats.bytes;
-        frame.motion = 0;
-        frame.dc = 0;
-        frame.idct = 0;
         d.writeIndex = (d.writeIndex + 1) % Decoder::QueueCapacity;
         if (status == S_OK)
         {
@@ -617,14 +610,9 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
     m_inputWaitTicks = frame.inputWaitTicks;
     m_audioWorkTicks = frame.audioWorkTicks;
     m_videoPacketHighWater = frame.videoPacketHighWater;
-    m_motionTicks = frame.motionTicks;
-    m_idctTicks = frame.idctTicks;
     m_worstReadTicks = frame.worstReadTicks;
     m_readCalls = frame.readCalls;
     m_readBytes = frame.readBytes;
-    m_motionBlocks = frame.motion;
-    m_dcBlocks = frame.dc;
-    m_idctBlocks = frame.idct;
     HRESULT hr = frame.status;
     if (hr == S_OK)
     {
@@ -804,11 +792,6 @@ double DvdFrameProbe::ReadMilliseconds() const
 double DvdFrameProbe::InputWaitMilliseconds() const
 { return m_parseFrequency ? m_inputWaitTicks * 1000.0 / m_parseFrequency : 0.0; }
 
-double DvdFrameProbe::MotionEstimateMilliseconds() const
-{ return m_parseFrequency ? m_motionTicks * 1000.0 / m_parseFrequency : 0.0; }
-
-double DvdFrameProbe::IdctEstimateMilliseconds() const
-{ return m_parseFrequency ? m_idctTicks * 1000.0 / m_parseFrequency : 0.0; }
 unsigned DvdFrameProbe::QueueDepth() const
 {
     if (!m_decoder)

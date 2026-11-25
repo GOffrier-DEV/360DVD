@@ -76,17 +76,16 @@ Debug builds write `game:\360DVD.log`, `game:\360DVD-nav.log`, and
 
 The DVD libraries are Git submodules under `deps/`. `libdvdread` and
 `libdvdnav` follow the Xbox port branches in this repository
-(`libdvdread-xbox` and `libdvdnav-xbox`); `libdvdcss`, `libmpeg2`, and FFmpeg
-are pinned to upstream revisions. The superproject records exact revisions;
-initialize them after cloning:
+(`libdvdread-xbox` and `libdvdnav-xbox`); `libdvdcss` and FFmpeg are pinned to
+upstream revisions. The superproject records exact revisions; initialize them
+after cloning:
 
 ```powershell
 git submodule update --init --recursive
 ```
 
-`libmpeg2` is retained for reference but is not built or linked by the 1.0
-player. See `docs/dependencies.md` for pinned revisions, licenses, and the
-porting boundary. Keep third-party sources and build outputs separate from
+See `docs/dependencies.md` for pinned revisions, licenses, and the porting
+boundary. Keep third-party sources and build outputs separate from
 application code.
 
 The Blades XUI layouts, icons, and Xenon font are Microsoft assets and are

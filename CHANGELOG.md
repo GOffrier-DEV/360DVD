@@ -29,8 +29,8 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 - Embedded Blades XUI scenes, icons, Xenon font, and DVD logo, so the XEX is
   the only deployment file.
 - AltiVec build with the Xenon IDCT path enabled by default.
-- Debug diagnostics: asynchronous `360DVD.log` progress, navigation log,
-  pacing CSV, and VMX/IDCT counters.
+- Debug diagnostics: asynchronous `360DVD.log` progress, navigation log, and
+  pacing CSV.
 
 ### Known limitations
 
@@ -41,8 +41,7 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 
 - libdvdread 7.1.1 and libdvdnav 7.0.1 from this repository's
   `libdvdread-xbox` and `libdvdnav-xbox` branches.
-- libdvdcss 1.6.0 and libmpeg2 upstream revisions pinned under `deps/`.
-  libmpeg2 is retained for reference and is not built.
+- libdvdcss 1.6.0 pinned under `deps/`.
 - FFmpeg 9.1 (`n9.1`), built as an LGPL-only static archive with MPEG-2,
   AC-3, MP2, LPCM, and DTS support.
 

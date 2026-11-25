@@ -10,9 +10,6 @@
 	path = deps/libdvdcss
 	url = https://code.videolan.org/videolan/libdvdcss.git
 	branch = master
-[submodule "deps/libmpeg2"]
-	path = deps/libmpeg2
-	url = https://code.videolan.org/videolan/libmpeg2.git
 [submodule "deps/ffmpeg"]
 	path = deps/ffmpeg
 	url = https://github.com/FFmpeg/FFmpeg.git

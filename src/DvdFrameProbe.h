@@ -47,13 +47,8 @@ public:
     unsigned Underruns() const { return m_underruns; }
     const char* DecodeMode() const { return m_decodeMode; }
     unsigned ActiveSliceThreads() const;
-    unsigned MotionBlocks() const { return m_motionBlocks; }
-    unsigned DcBlocks() const { return m_dcBlocks; }
-    unsigned IdctBlocks() const { return m_idctBlocks; }
     double ReadMilliseconds() const;
     double InputWaitMilliseconds() const;
-    double MotionEstimateMilliseconds() const;
-    double IdctEstimateMilliseconds() const;
     unsigned QueueDepth() const;
     double LastDecodeMilliseconds() const;
     double LastDecodeCpuMilliseconds() const { return m_lastDecodeCpuMs; }
@@ -88,14 +83,12 @@ private:
     LONGLONG m_parseTicks, m_parseFrequency;
     LONGLONG m_readTicks, m_uploadTicks, m_gpuWaitTicks;
     LONGLONG m_inputWaitTicks;
-    LONGLONG m_motionTicks, m_idctTicks;
     LONGLONG m_lastDecodeTicks, m_lastCopyTicks;
     double m_lastDecodeCpuMs;
     LONGLONG m_worstReadTicks;
     unsigned m_readCalls, m_readBytes;
     unsigned m_underruns, m_textureSet;
     const char* m_decodeMode;
-    unsigned m_motionBlocks, m_dcBlocks, m_idctBlocks;
     HRESULT LoadPlanes(IDirect3DDevice9* device, unsigned width, unsigned height,
                        const unsigned char* const planes[3], unsigned stride);
     DvdFrameProbe(const DvdFrameProbe&);

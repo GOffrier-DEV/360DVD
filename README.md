@@ -93,13 +93,11 @@ git submodule update --init --recursive
 | `libdvdcss` | [VideoLAN libdvdcss](https://code.videolan.org/videolan/libdvdcss) | [Pinned upstream source](https://code.videolan.org/videolan/libdvdcss/-/tree/811ce97a1d4d1c9d936f4b2707f533a9ef768251) |
 | FFmpeg | [FFmpeg](https://ffmpeg.org/) | [Pinned upstream source](https://github.com/FFmpeg/FFmpeg/tree/74e4393595cf2b5857f0da925c4e0dd74ea306e5) |
 
-See [the dependency notes](docs/dependencies.md) for pinned revisions, licenses, and the porting
-boundary. Keep third-party sources and build outputs separate from
-application code.
+See [the dependency notes](docs/dependencies.md) for pinned revisions,
+licenses, and Xbox porting details.
 
 The Blades XUI layouts, icons, and Xenon font are Microsoft assets and are
 not covered by the GPL. The DVD-Video logo artwork is documented in
 [`assets/ATTRIBUTION.md`](assets/ATTRIBUTION.md); it comes from
 [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:DVD-Video_Logo.svg)
-and may be subject to trademark restrictions. Review both before
-redistributing a built XEX.
+and may be subject to trademark restrictions.

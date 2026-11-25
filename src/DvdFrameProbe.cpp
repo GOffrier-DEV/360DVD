@@ -55,6 +55,7 @@ namespace
         return ok ? hr : E_FAIL;
     }
 
+#ifdef DVD360_LOGGING
     bool DecodeCpuTime(ULONGLONG& ticks)
     {
         FILETIME created, exited, kernel, user;
@@ -64,6 +65,7 @@ namespace
               + ((ULONGLONG)user.dwHighDateTime << 32) + user.dwLowDateTime;
         return true;
     }
+#endif
 }
 
 struct DvdFrameProbe::QueuedFrame
@@ -542,16 +544,22 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
             break;
         QueuedFrame& frame = d.queue[d.writeIndex];
         LARGE_INTEGER start, finish;
+#ifdef DVD360_LOGGING
         ULONGLONG cpuStart = 0, cpuFinish = 0;
         const bool haveCpuStart = DecodeCpuTime(cpuStart);
+#endif
         QueryPerformanceCounter(&start);
         const HRESULT status = player.NextFrame(frame);
         if (status == S_FALSE && seeking && d.discResumeRequest && !initialFrames &&
             FfmpegDiscBoundaryPending(d.io))
             d.emptyDiscBoundary = true;
         QueryPerformanceCounter(&finish);
+#ifdef DVD360_LOGGING
         frame.decodeCpuMs = haveCpuStart && DecodeCpuTime(cpuFinish) && cpuFinish >= cpuStart
             ? (cpuFinish - cpuStart) / 10000.0 : -1.0;
+#else
+        frame.decodeCpuMs = -1.0;
+#endif
         frame.decodeTicks = finish.QuadPart - start.QuadPart;
         frame.status = status;
         frame.calls = d.calls;

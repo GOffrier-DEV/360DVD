@@ -3,6 +3,14 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] - 2026-11-25
+
+- Improved CD audio startup and recovery after switching from DVD playback.
+- Replaced the No Disc logo with centered DVD + CD artwork and centered
+  the status text. Removed the brief DVD logo flash during CD startup.
+- Matched the green focus glow to each CD transport button's shape while
+  keeping the bar on the direct XUI render path.
+
 ## [1.5.1] - 2026-11-25
 
 - Fixed the XAM patch offset so eject keeps 360DVD open for both CDs and
@@ -118,3 +126,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.4.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.1
 [1.5.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.0
 [1.5.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.1
+[1.5.2]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.2

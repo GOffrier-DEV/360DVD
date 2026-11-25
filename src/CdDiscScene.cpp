@@ -1,5 +1,6 @@
 #include "CdDiscScene.h"
 #include "DvdEmbeddedResources.h"
+#include "PlaybackOsd.h"
 #include <d3dx9.h>
 #include <math.h>
 #include <string.h>
@@ -32,6 +33,8 @@ namespace
 
 CdDiscScene::~CdDiscScene()
 {
+    if (transportResolved) transportResolved->Release();
+    if (transportTarget) transportTarget->Release();
     if (blurPs) blurPs->Release();
     if (ps) ps->Release();
     if (vs) vs->Release();
@@ -41,6 +44,81 @@ CdDiscScene::~CdDiscScene()
     if (resolved) resolved->Release();
     if (artwork) artwork->Release();
     if (mesh) mesh->Release();
+}
+
+bool CdDiscScene::DrawTransport(IDirect3DDevice9* device, PlaybackOsd& osd,
+                                bool paused, double elapsed)
+{
+    if (!ready) return false;
+    const UINT width = PlaybackOsd::SceneWidth, height = PlaybackOsd::SceneHeight;
+    if (!transportAttempted)
+    {
+        transportAttempted = true;
+        D3DSURFACE_PARAMETERS params = {};
+        // Keep this target above the single-sample backbuffer in EDRAM.
+        // The disc pass has already resolved and no longer needs its depth tiles.
+        params.Base = 512;
+        transportReady = SUCCEEDED(device->CreateRenderTarget(
+            width, height, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_2_SAMPLES, 0, FALSE,
+            &transportTarget, &params)) && SUCCEEDED(device->CreateTexture(
+            width, height, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &transportResolved, NULL));
+    }
+    if (!transportReady) return false;
+    IDirect3DSurface9* back = NULL;
+    IDirect3DSurface9* oldDepth = NULL;
+    if (FAILED(device->GetRenderTarget(0, &back)) || !back) return false;
+    device->GetDepthStencilSurface(&oldDepth);
+    D3DVIEWPORT9 previous;
+    device->GetViewport(&previous);
+    DWORD msaa;
+    device->GetRenderState(D3DRS_MULTISAMPLEANTIALIAS, &msaa);
+    device->SetDepthStencilSurface(NULL);
+    device->SetRenderTarget(0, transportTarget);
+    const D3DVIEWPORT9 viewport = {0, 0, width, height, 0.f, 1.f};
+    device->SetViewport(&viewport);
+    device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
+    device->Clear(0, NULL, D3DCLEAR_TARGET, 0, 1.f, 0);
+    osd.DrawCd(paused, elapsed);
+    device->Resolve(D3DRESOLVE_RENDERTARGET0 | D3DRESOLVE_ALLFRAGMENTS,
+                    NULL, transportResolved, NULL, 0, 0, NULL, 1.f, 0, NULL);
+
+    device->SetRenderTarget(0, back);
+    device->SetDepthStencilSurface(oldDepth);
+    device->SetViewport(&previous);
+    device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, msaa);
+    if (oldDepth) oldDepth->Release();
+    back->Release();
+    if (FAILED(device->BeginScene())) return false;
+    DWORD z, cull, blend, src, dst;
+    device->GetRenderState(D3DRS_ZENABLE, &z);
+    device->GetRenderState(D3DRS_CULLMODE, &cull);
+    device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+    device->GetRenderState(D3DRS_SRCBLEND, &src);
+    device->GetRenderState(D3DRS_DESTBLEND, &dst);
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+    device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    device->SetVertexDeclaration(declaration);
+    device->SetVertexShader(vs);
+    device->SetPixelShader(ps);
+    D3DXMATRIX matrix;
+    D3DXMatrixIdentity(&matrix);
+    device->SetVertexShaderConstantF(0, reinterpret_cast<const float*>(&matrix), 4);
+    const Vertex quad[] = {
+        {-1,1,.5f,0,0}, {1,1,.5f,1,0}, {-1,-1,.5f,0,1}, {1,-1,.5f,1,1}
+    };
+    device->SetTexture(0, transportResolved);
+    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+    device->SetTexture(0, NULL);
+    device->SetRenderState(D3DRS_ZENABLE, z);
+    device->SetRenderState(D3DRS_CULLMODE, cull);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
+    device->SetRenderState(D3DRS_SRCBLEND, src);
+    device->SetRenderState(D3DRS_DESTBLEND, dst);
+    device->EndScene();
+    return true;
 }
 
 void CdDiscScene::Reset()

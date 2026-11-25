@@ -5047,6 +5047,24 @@
   </XuiVisual>
   <XuiVisual>
     <Properties>
+      <Id>dvd_Label_NoDisc</Id>
+      <Width>373.000000</Width>
+      <Height>24.000000</Height>
+    </Properties>
+    <XuiTextPresenter>
+      <Properties>
+        <Id>Text</Id>
+        <Width>373.000000</Width>
+        <Height>24.000000</Height>
+        <Anchor>15</Anchor>
+        <TextColor>0xffffffff</TextColor>
+        <PointSize>11.520000</PointSize>
+        <TextStyle>17409</TextStyle>
+      </Properties>
+    </XuiTextPresenter>
+  </XuiVisual>
+  <XuiVisual>
+    <Properties>
       <Id>BlankVisual</Id>
       <Width>420.000000</Width>
       <Height>144.000000</Height>

@@ -17,6 +17,7 @@ $files = @(
     Get-ChildItem -LiteralPath $blades -File |
         Where-Object { $_.Extension -in '.png', '.ttf' } | Sort-Object Name
     Get-Item -LiteralPath (Join-Path $Assets 'dvd-video-logo.bmp')
+    Get-Item -LiteralPath (Join-Path $Assets 'DVD-plus-CD-original.png')
     Get-Item -LiteralPath (Join-Path $Assets 'compact-disc.bin')
     Get-Item -LiteralPath (Join-Path $Assets 'compact-disc.png')
 )

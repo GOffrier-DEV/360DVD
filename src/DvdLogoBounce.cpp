@@ -310,16 +310,29 @@ void DvdLogoBounce::Center()
     m_y = (float(m_screenHeight) - m_height) * 0.5f;
 }
 
-void DvdLogoBounce::Render()
+void DvdLogoBounce::Render(bool noDisc)
 {
     if (!m_device || !m_texture || !m_vertexShader || !m_pixelShader)
         return;
 
-    const float left = m_x / (float)m_screenWidth * 2.0f - 1.0f;
-    const float right = (m_x + m_width) / (float)m_screenWidth * 2.0f - 1.0f;
-    const float top = 1.0f - m_y / (float)m_screenHeight * 2.0f;
-    const float bottom = 1.0f - (m_y + m_height) / (float)m_screenHeight * 2.0f;
-    const float imageV = 307.2f / 512.0f;
+    if (noDisc && !m_noDiscLoadAttempted)
+    {
+        m_noDiscLoadAttempted = true;
+        UINT size = 0;
+        const BYTE* png = FindDvdResource(L"DVD-plus-CD-original.png", size);
+        D3DXIMAGE_INFO info = {};
+        if (png && SUCCEEDED(D3DXGetImageInfoFromFileInMemory(png, size, &info)) &&
+            SUCCEEDED(D3DXCreateTextureFromFileInMemory(m_device, png, size, &m_noDiscTexture)))
+            m_noDiscAspect = float(info.Width) / info.Height;
+    }
+    const bool combined = noDisc && m_noDiscTexture;
+    const float halfWidth = .28f;
+    const float halfHeight = halfWidth * (16.f / 9.f) / m_noDiscAspect;
+    const float left = combined ? -halfWidth : m_x / m_screenWidth * 2.f - 1.f;
+    const float right = combined ? halfWidth : (m_x + m_width) / m_screenWidth * 2.f - 1.f;
+    const float top = combined ? halfHeight : 1.f - m_y / m_screenHeight * 2.f;
+    const float bottom = combined ? -halfHeight : 1.f - (m_y + m_height) / m_screenHeight * 2.f;
+    const float imageV = combined ? 1.f : 307.2f / 512.0f;
 
     const Vertex quad[] =
     {
@@ -329,7 +342,7 @@ void DvdLogoBounce::Render()
         { right, bottom, 0.0f, 1.0f, 1.0f, imageV }
     };
 
-    const DWORD color = kColors[m_colorIndex];
+    const DWORD color = combined ? 0xffffffff : kColors[m_colorIndex];
     const float tint[4] =
     {
         ((color >> 16) & 255) / 255.0f,
@@ -347,7 +360,7 @@ void DvdLogoBounce::Render()
     m_device->SetVertexShader(m_vertexShader);
     m_device->SetPixelShader(m_pixelShader);
     m_device->SetPixelShaderConstantF(0, tint, 1);
-    m_device->SetTexture(0, m_texture);
+    m_device->SetTexture(0, combined ? m_noDiscTexture : m_texture);
     m_device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     m_device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
     m_device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
@@ -362,6 +375,9 @@ void DvdLogoBounce::Render()
 
 void DvdLogoBounce::Shutdown()
 {
+    if (m_noDiscTexture) m_noDiscTexture->Release();
+    m_noDiscTexture = NULL;
+    m_noDiscLoadAttempted = false;
     if (m_vertexDeclaration)
     {
         m_vertexDeclaration->Release();

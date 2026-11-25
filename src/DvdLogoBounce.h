@@ -11,7 +11,7 @@ public:
 
     bool Startup(IDirect3DDevice9* device, int screenWidth, int screenHeight);
     void Update(float elapsedSeconds);
-    void Render();
+    void Render(bool noDisc = false);
     void Center();
     void Shutdown();
 
@@ -21,6 +21,9 @@ private:
 
     IDirect3DDevice9* m_device;
     IDirect3DTexture9* m_texture;
+    IDirect3DTexture9* m_noDiscTexture = NULL;
+    float m_noDiscAspect = 1.f;
+    bool m_noDiscLoadAttempted = false;
     IDirect3DVertexShader9* m_vertexShader;
     IDirect3DPixelShader9* m_pixelShader;
     IDirect3DVertexDeclaration9* m_vertexDeclaration;

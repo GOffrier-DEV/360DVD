@@ -3,11 +3,14 @@
 #include <xtl.h>
 #include <d3d9.h>
 
+class PlaybackOsd;
+
 class CdDiscScene
 {
 public:
     ~CdDiscScene();
     bool Draw(IDirect3DDevice9* device, bool spinning, double elapsed);
+    bool DrawTransport(IDirect3DDevice9* device, PlaybackOsd& osd, bool paused, double elapsed);
     void Reset();
 
 private:
@@ -24,4 +27,8 @@ private:
     IDirect3DVertexShader9* vs = NULL;
     IDirect3DPixelShader9* ps = NULL;
     IDirect3DPixelShader9* blurPs = NULL;
+    bool transportAttempted = false;
+    bool transportReady = false;
+    IDirect3DSurface9* transportTarget = NULL;
+    IDirect3DTexture9* transportResolved = NULL;
 };

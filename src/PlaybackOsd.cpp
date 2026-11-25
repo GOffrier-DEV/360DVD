@@ -38,7 +38,8 @@ namespace
         const wchar_t* name = locator;
         for (const wchar_t* p = locator; *p; ++p)
             if (*p == L'/' || *p == L'\\') name = p + 1;
-        if (wcsncmp(name, L"ico_32x_", 8) != 0 && wcsncmp(name, L"wmp11-", 6) != 0)
+        if (wcsncmp(name, L"ico_32x_", 8) != 0 && wcsncmp(name, L"wmp11-", 6) != 0 &&
+            wcsncmp(name, L"cd-focus-", 9) != 0)
             return XuiPNGTextureLoader(device, locator, info, texture);
         UINT size;
         const BYTE* png = FindDvdResource(name, size);
@@ -128,6 +129,7 @@ HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAME
     else
     {
         XuiSceneCreate(root, L"CdPadPlayback.xur", NULL, &m_cdScene);
+        XuiSceneCreate(root, L"NoDisc.xur", NULL, &m_noDiscScene);
         stage = SUCCEEDED(XuiSceneCreate(root, L"DvdTrackPopup.xur", NULL, &m_stockPopup))
             ? "Stock XUI: ready" : "Stock XUI: ready (track popup asset unavailable)";
     }
@@ -136,6 +138,8 @@ HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAME
 
 void PlaybackOsd::CloseStock()
 {
+    if (m_noDiscScene) XuiDestroyObject(m_noDiscScene);
+    m_noDiscScene = NULL;
     if (m_cdScene) XuiDestroyObject(m_cdScene);
     m_cdScene = NULL;
     ResetCdFocus();
@@ -472,12 +476,13 @@ void PlaybackOsd::ShowNoDisc()
 
 void PlaybackOsd::DrawNoDisc()
 {
-    if (!m_stockPopup || FAILED(XuiRenderBegin(m_stockDc, 0))) return;
-    XuiElementSetOpacity(m_stockPopup, 1.0f);
+    const HXUIOBJ scene = m_noDiscScene ? m_noDiscScene : m_stockPopup;
+    if (!scene || FAILED(XuiRenderBegin(m_stockDc, 0))) return;
+    XuiElementSetOpacity(scene, 1.0f);
     XUIMessage msg;
     XUIMessageRender render;
     XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
-    XuiSendMessage(m_stockPopup, &msg);
+    XuiSendMessage(scene, &msg);
     XuiRenderEnd(m_stockDc);
 }
 

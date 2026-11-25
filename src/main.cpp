@@ -190,7 +190,8 @@ namespace
         return false;
     }
 
-    HRESULT CdAudioPlayer::Play()
+    // Keep RXDK's protected Interlocked sequences intact in Release builds.
+    __attribute__((optnone)) HRESULT CdAudioPlayer::Play()
     {
         XboxDvdStream stream;
         if (!stream.Open()) return HRESULT_FROM_NT(stream.LastStatus());
@@ -215,6 +216,9 @@ namespace
         unsigned next = 0;
         bool started = false;
         bool loggedStart = false;
+        UINT64 lastSamples = 0;
+        DWORD lastProgress = GetTickCount();
+        unsigned restartAttempts = 0;
         unsigned track = 0;
         unsigned lba = probe.tracks[0].start;
         while (hr == S_OK)
@@ -231,6 +235,7 @@ namespace
                 if (SUCCEEDED(hr)) hr = voice->FlushSourceBuffers();
                 if (FAILED(hr)) break;
                 started = false;
+                restartAttempts = 0;
                 next = 0;
                 const LONG target = static_cast<LONG>(track) + jump;
                 track = target < 0 ? 0 : static_cast<unsigned>(target);
@@ -241,25 +246,45 @@ namespace
             {
                 if (started) hr = voice->Stop();
                 started = false;
+                restartAttempts = 0;
                 WaitForSingleObject(stop, 5);
                 continue;
             }
-            if (!started)
+            XAUDIO2_VOICE_STATE state = {};
+            voice->GetState(&state);
+            if (!started && state.BuffersQueued)
             {
                 hr = voice->Start();
                 if (FAILED(hr)) break;
                 started = true;
+                lastProgress = GetTickCount();
                 if (!loggedStart)
                 {
                     BootLog("CD audio: XAudio2 started (byte-swapped PCM)");
                     loggedStart = true;
                 }
             }
+            const DWORD now = GetTickCount();
+            if (!state.BuffersQueued || state.SamplesPlayed != lastSamples)
+            {
+                lastSamples = state.SamplesPlayed;
+                lastProgress = now;
+                restartAttempts = 0;
+            }
+            else if (started && restartAttempts < 3 &&
+                     now - lastProgress >= (restartAttempts ? 750u : 250u))
+            {
+                // Like the DVD voice, recover when queued PCM stops advancing.
+                hr = voice->Stop();
+                if (SUCCEEDED(hr)) hr = voice->Start();
+                BootLog("CD audio: restarting stalled XAudio2 voice", hr);
+                if (FAILED(hr)) break;
+                ++restartAttempts;
+                lastProgress = now;
+            }
             if (track < probe.audioTracks)
             {
                 const auto& range = probe.tracks[track];
-                XAUDIO2_VOICE_STATE state;
-                voice->GetState(&state);
                 if (lba == range.end)
                 {
                     if (state.BuffersQueued)
@@ -751,7 +776,6 @@ namespace
         device->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
         if (SUCCEEDED(device->BeginScene()))
         {
-            animation.Render();
             device->EndScene();
             device->Present(NULL, NULL, NULL, NULL);
         }
@@ -1090,7 +1114,7 @@ namespace
                 }
                 else if (!cdAudio.HasDisc() ||
                          !cdScene.Draw(device, !cdAudio.Paused(), elapsed))
-                    animation.Render();
+                    animation.Render(noDisc);
                 device->EndScene();
                 if (osdReady && noDisc)
                     osd.DrawNoDisc();

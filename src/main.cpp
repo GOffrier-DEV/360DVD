@@ -650,6 +650,7 @@ namespace
         else
             ProbeLog("thread creation failed", GetLastError());
         static PlaybackOsd osd;
+        const unsigned subtitleCount = frame.SubtitleCount();
         const HRESULT osdStatus = showFrame && compressed ? osd.Open(device) : S_FALSE;
         const bool osdReady = osdStatus == S_OK;
         if (FAILED(osdStatus))
@@ -657,12 +658,13 @@ namespace
         if (osdReady)
         {
             char display[128];
-            sprintf_s(display, sizeof(display), "Playback display: output=%ux%u source_aspect=%.3f",
-                      present.BackBufferWidth, present.BackBufferHeight, frame.DisplayAspect());
+            sprintf_s(display, sizeof(display), "Playback display: output=%ux%u source_aspect=%.3f subtitle_tracks=%u",
+                      present.BackBufferWidth, present.BackBufferHeight, frame.DisplayAspect(), subtitleCount);
             BootLog(display);
         }
         bool paused = false;
         unsigned displayMode = 0;
+        unsigned subtitle = 0;
         double playbackSeconds = 0;
         const double playbackDuration = frame.DurationSeconds();
         LARGE_INTEGER frequency;
@@ -710,6 +712,8 @@ namespace
                 }
                 else if (action == PlaybackOsd::DisplayMode)
                     displayMode = (displayMode + 1) % PlaybackOsd::DisplayModeCount;
+                else if (action == PlaybackOsd::SubtitleTrack)
+                    subtitle = (subtitle + 1) % (subtitleCount + 1);
             }
             const unsigned queueBefore = capture ? frame.QueueDepth() : 0;
             const unsigned frameBefore = frame.FramesReady();
@@ -754,8 +758,13 @@ namespace
                     drewVideo = SUCCEEDED(frame.Draw(device, present.BackBufferWidth,
                                                      present.BackBufferHeight, displayMode));
                     if (osdReady && capture && !playbackEnded)
+                    {
+                        frame.DrawSubtitles(device, osd, present.BackBufferWidth,
+                                            present.BackBufferHeight, displayMode, subtitle, playbackSeconds);
                         osd.Draw(device, present.BackBufferWidth, present.BackBufferHeight,
-                                 paused, displayMode, playbackSeconds, playbackDuration);
+                                 paused, displayMode, playbackSeconds, playbackDuration,
+                                 subtitle, subtitleCount);
+                    }
                 }
                 else
                     animation.Render();

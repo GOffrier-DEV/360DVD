@@ -9,6 +9,8 @@
 
 #include "FfmpegFileIo.h"
 #include "FfmpegAudio.h"
+#include "PlaybackOsd.h"
+#include <stdlib.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -98,6 +100,12 @@ struct DvdFrameProbe::Decoder
     float displayAspect;
     FfmpegAudio* audio;
     int audioStream;
+    enum { SubtitleTracks = 32, SubtitleCues = 24 };
+    struct Cue { AVSubtitle bitmap; double start, end; unsigned track; };
+    AVCodecContext* subtitleCodec[SubtitleTracks];
+    int subtitleStream[SubtitleTracks];
+    unsigned subtitleCount, cueCount;
+    Cue cues[SubtitleCues];
     bool audioFailed;
     bool videoEnded;
     bool flushed;
@@ -136,6 +144,34 @@ void DvdFrameProbe::Decoder::PumpPacket()
             packetHighWater = packetCount;
         return;
     }
+    if (result == 0)
+        for (unsigned i = 0; i < subtitleCount; ++i)
+        {
+            if (packet->stream_index != subtitleStream[i]) continue;
+            AVSubtitle subtitle = {};
+            int got = 0;
+            avcodec_decode_subtitle2(subtitleCodec[i], &subtitle, &got, packet);
+            if (got && subtitle.num_rects && packet->pts != AV_NOPTS_VALUE)
+            {
+                const double pts = packet->pts * av_q2d(format->streams[packet->stream_index]->time_base);
+                const double origin = format->start_time == AV_NOPTS_VALUE
+                    ? 0 : format->start_time / double(AV_TIME_BASE);
+                EnterCriticalSection(&queueStats);
+                if (cueCount < SubtitleCues)
+                {
+                    Cue& cue = cues[cueCount++];
+                    cue.bitmap = subtitle;
+                    cue.track = i + 1;
+                    cue.start = pts - origin + subtitle.start_display_time / 1000.0;
+                    cue.end = pts - origin + subtitle.end_display_time / 1000.0;
+                    if (cue.end <= cue.start) cue.end = cue.start + 5;
+                    subtitle = AVSubtitle();
+                }
+                LeaveCriticalSection(&queueStats);
+            }
+            avsubtitle_free(&subtitle);
+            break;
+        }
     if (audio && !audioFailed &&
         (result == AVERROR_EOF || (result == 0 && packet->stream_index == audioStream)))
     {
@@ -199,6 +235,10 @@ void DvdFrameProbe::CloseDecoder()
     if (d.freeSlots) CloseHandle(d.freeSlots);
     if (d.stop) CloseHandle(d.stop);
     delete d.audio;
+    for (unsigned i = 0; i < d.cueCount; ++i)
+        avsubtitle_free(&d.cues[i].bitmap);
+    for (unsigned i = 0; i < d.subtitleCount; ++i)
+        avcodec_free_context(&d.subtitleCodec[i]);
     for (unsigned i = 0; i < Decoder::PacketCapacity; ++i)
         av_packet_unref(&d.pendingVideo[i]);
     av_packet_free(&d.packet);
@@ -565,6 +605,40 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         const AVCodec* audioCodec = NULL;
         d.audioStream = av_find_best_stream(d.format, AVMEDIA_TYPE_AUDIO,
                                             -1, d.video, &audioCodec, 0);
+        FILE* trackFile = fopen("game:\\audio-track.txt", "r");
+        if (trackFile)
+        {
+            char text[24] = {};
+            unsigned wanted = fgets(text, sizeof(text), trackFile) ? strtoul(text, NULL, 10) : 0;
+            fclose(trackFile);
+            for (unsigned i = 0; wanted && i < d.format->nb_streams; ++i)
+            {
+                const AVCodecParameters* par = d.format->streams[i]->codecpar;
+                const AVCodec* candidate = par->codec_type == AVMEDIA_TYPE_AUDIO
+                    ? avcodec_find_decoder(par->codec_id) : NULL;
+                if (candidate && --wanted == 0)
+                {
+                    d.audioStream = i;
+                    audioCodec = candidate;
+                    break;
+                }
+            }
+        }
+        const AVCodec* sub = avcodec_find_decoder(AV_CODEC_ID_DVD_SUBTITLE);
+        for (unsigned i = 0; sub && i < d.format->nb_streams && d.subtitleCount < Decoder::SubtitleTracks; ++i)
+        {
+            const AVCodecParameters* par = d.format->streams[i]->codecpar;
+            if (par->codec_id != AV_CODEC_ID_DVD_SUBTITLE) continue;
+            AVCodecContext* context = avcodec_alloc_context3(sub);
+            if (!context) continue;
+            if (avcodec_parameters_to_context(context, par) < 0 || avcodec_open2(context, sub, NULL) < 0)
+                avcodec_free_context(&context);
+            else
+            {
+                d.subtitleStream[d.subtitleCount] = i;
+                d.subtitleCodec[d.subtitleCount++] = context;
+            }
+        }
         if (d.audioStream >= 0 && audioCodec)
         {
             d.audio = new FfmpegAudio();
@@ -770,14 +844,14 @@ HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsi
     return device->CreateVertexDeclaration(elements, &m_decl);
 }
 
-HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height,
-                            unsigned displayMode) const
+void DvdFrameProbe::DisplayGeometry(unsigned width, unsigned height, unsigned displayMode,
+                                    float& x, float& y, float& u, float& v) const
 {
     const float aspect = (float)width / height;
     const float sourceAspect = DisplayAspect();
-    float x = aspect > sourceAspect ? sourceAspect / aspect : 1.0f;
-    float y = aspect < sourceAspect ? aspect / sourceAspect : 1.0f;
-    float u = 0, v = 0;
+    x = aspect > sourceAspect ? sourceAspect / aspect : 1.0f;
+    y = aspect < sourceAspect ? aspect / sourceAspect : 1.0f;
+    u = v = 0;
     if (displayMode == 2) // Fullscreen: fill without distortion, cropping the excess.
     {
         u = (1 - y) / 2;
@@ -806,6 +880,57 @@ HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned h
             if (y > 1) { v = (1 - 1 / y) / 2; y = 1; }
         }
     }
+}
+
+unsigned DvdFrameProbe::SubtitleCount() const
+{
+    return m_decoder ? m_decoder->subtitleCount : 0;
+}
+
+void DvdFrameProbe::DrawSubtitles(IDirect3DDevice9* device, PlaybackOsd& osd, unsigned width,
+                                 unsigned height, unsigned mode, unsigned track, double seconds)
+{
+    if (!m_decoder || !m_width || !m_height) return;
+    Decoder& d = *m_decoder;
+    const Decoder::Cue* selected = NULL;
+    // Only the render thread removes cues. The decoder only appends.
+    EnterCriticalSection(&d.queueStats);
+    unsigned kept = 0;
+    for (unsigned i = 0; i < d.cueCount; ++i)
+    {
+        if (d.cues[i].end <= seconds)
+            avsubtitle_free(&d.cues[i].bitmap);
+        else
+        {
+            d.cues[kept] = d.cues[i];
+            const Decoder::Cue& cue = d.cues[kept++];
+            if (cue.track == track && cue.start <= seconds &&
+                (!selected || cue.start >= selected->start))
+                selected = &cue;
+        }
+    }
+    d.cueCount = kept;
+    LeaveCriticalSection(&d.queueStats);
+    if (!selected || !osd.Ready()) return;
+    float x, y, u, v;
+    DisplayGeometry(width, height, mode, x, y, u, v);
+    const float sw = 1280 * x / (1 - 2 * u), sh = 720 * y / (1 - 2 * v);
+    const float sx = sw / m_width, sy = sh / m_height;
+    for (unsigned i = 0; i < selected->bitmap.num_rects; ++i)
+    {
+        const AVSubtitleRect& rect = *selected->bitmap.rects[i];
+        if (rect.type == SUBTITLE_BITMAP && rect.data[0] && rect.data[1])
+            osd.DrawBitmap(device, (1280 - sw) / 2 + rect.x * sx,
+                           (720 - sh) / 2 + rect.y * sy, sx, sy, rect.w, rect.h,
+                           rect.data[0], rect.linesize[0], rect.data[1], rect.nb_colors);
+    }
+}
+
+HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height,
+                            unsigned displayMode) const
+{
+    float x, y, u, v;
+    DisplayGeometry(width, height, displayMode, x, y, u, v);
     const float vertices[][6] = {
         {-x,  y, 0, 1, u, v}, {x,  y, 0, 1, 1-u, v},
         {-x, -y, 0, 1, u, 1-v}, {x, -y, 0, 1, 1-u, 1-v}

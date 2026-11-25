@@ -140,6 +140,11 @@
     <ClInclude Include="src\XboxDvdStream.h" />
   </ItemGroup>
   <ItemGroup>
+    <CustomBuild Include="tools\build-osd-atlas.ps1">
+      <Message>Building antialiased playback font and controller glyphs</Message>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "%(FullPath)" "$(OutDir)Media\playback-osd.atlas"</Command>
+      <Outputs>$(OutDir)Media\playback-osd.atlas</Outputs>
+    </CustomBuild>
     <CustomBuild Include="media\dvd-video-logo.bmp">
       <Message>Copying DVD logo texture</Message>
       <Command>if not exist "$(OutDir)Media" mkdir "$(OutDir)Media"

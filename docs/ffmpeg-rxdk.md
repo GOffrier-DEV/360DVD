@@ -86,9 +86,15 @@ transfers with baked-in widescreen bars). Auto and Letterbox both preserve
 the source aspect ratio. Fullscreen and Stretch also look the same as Auto
 when the source and output already match. The boot log reports both ratios.
 
+Select **Subtitles** to cycle through discovered DVD bitmap streams and
+Off. Standalone VOB files may lack disc-provided palettes and language
+labels. To select audio at startup, put a one-based supported audio
+track number in `audio-track.txt` beside the XEX. Remove the file to
+use FFmpeg's preferred track.
+
 This overlay controls the MPEG-2/VOB fixture player. DVD menus, chapter
-navigation, scan/seek, alternate audio/subtitle selection, and resume
-bookmarks are not implemented by this playback path.
+navigation, scan/seek, live audio switching, and resume bookmarks are
+not implemented by this playback path.
 
 For an affinity A/B test, run the same XEX and VOB with and without an
 empty `playback-affinity.enable` beside the XEX. The marker requests

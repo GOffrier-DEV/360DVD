@@ -4,6 +4,8 @@
 #include <d3d9.h>
 #include <stdio.h>
 
+class PlaybackOsd;
+
 class DvdFrameProbe
 {
 public:
@@ -15,6 +17,9 @@ public:
     HRESULT SetEmbeddedAudioPaused(bool paused);
     double DurationSeconds() const;
     float DisplayAspect() const;
+    unsigned SubtitleCount() const;
+    void DrawSubtitles(IDirect3DDevice9* device, PlaybackOsd& osd, unsigned width,
+                       unsigned height, unsigned mode, unsigned track, double seconds);
     double AdvanceEmbeddedAudio(double fallback);
     bool EmbeddedAudioState(double& milliseconds, unsigned& buffers) const;
     void StartupVideoBuffer(unsigned& queued, unsigned& target, unsigned& budget) const;
@@ -51,6 +56,8 @@ public:
                  unsigned displayMode = 0) const;
 
 private:
+    void DisplayGeometry(unsigned width, unsigned height, unsigned mode,
+                         float& x, float& y, float& u, float& v) const;
     struct QueuedFrame;
     HRESULT NextFrame(QueuedFrame& frame);
     HRESULT Consume(IDirect3DDevice9* device, DWORD timeout, bool audioMaster = false);

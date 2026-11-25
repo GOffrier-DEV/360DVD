@@ -143,6 +143,6 @@ exec "$src/configure" \
     --disable-network --disable-asm --disable-inline-asm "${simd[@]}" \
     --disable-pthreads --disable-avdevice --disable-avfilter \
     --enable-swresample --disable-swscale \
-    --enable-decoder=mpeg2video,ac3,mp2,pcm_dvd,dca \
-    --enable-parser=mpegvideo,ac3,mpegaudio,dca \
+    --enable-decoder=mpeg2video,ac3,mp2,pcm_dvd,dca,dvdsub \
+    --enable-parser=mpegvideo,ac3,mpegaudio,dca,dvdsub \
     --enable-demuxer=mpegps,mpegvideo "$@"

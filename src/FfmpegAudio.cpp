@@ -57,6 +57,8 @@ HRESULT FfmpegAudio::Open(const AVStream& stream)
 
 HRESULT FfmpegAudio::Start()
 {
+    if (!m_voice)
+        return E_FAIL;
     const HRESULT hr = m_voice->Start(0);
     if (SUCCEEDED(hr))
         InterlockedExchange(&m_started, 1);
@@ -70,6 +72,8 @@ void FfmpegAudio::Finish()
 
 HRESULT FfmpegAudio::SetPaused(bool paused)
 {
+    if (!m_voice)
+        return E_FAIL;
     m_voiceStall = 0;
     m_voiceRestartAttempts = 0;
     return paused ? m_voice->Stop(0) : Start();
@@ -77,6 +81,8 @@ HRESULT FfmpegAudio::SetPaused(bool paused)
 
 double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
 {
+    if (!m_voice)
+        return fallback;
     XAUDIO2_VOICE_STATE state;
     m_voice->GetState(&state);
     const UINT64 samples = state.SamplesPlayed;
@@ -125,6 +131,8 @@ double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
 
 bool FfmpegAudio::IsPlaying() const
 {
+    if (!m_voice)
+        return false;
     XAUDIO2_VOICE_STATE state;
     m_voice->GetState(&state);
     return state.BuffersQueued != 0;
@@ -132,6 +140,8 @@ bool FfmpegAudio::IsPlaying() const
 
 unsigned FfmpegAudio::QueuedBuffers() const
 {
+    if (!m_voice)
+        return 0;
     XAUDIO2_VOICE_STATE state;
     m_voice->GetState(&state);
     return state.BuffersQueued;
@@ -139,6 +149,12 @@ unsigned FfmpegAudio::QueuedBuffers() const
 
 void FfmpegAudio::GetPlaybackState(UINT64& samples, unsigned& buffers) const
 {
+    if (!m_voice)
+    {
+        samples = 0;
+        buffers = 0;
+        return;
+    }
     XAUDIO2_VOICE_STATE state;
     m_voice->GetState(&state);
     samples = state.SamplesPlayed;
@@ -147,6 +163,8 @@ void FfmpegAudio::GetPlaybackState(UINT64& samples, unsigned& buffers) const
 
 HRESULT FfmpegAudio::Convert(const AVFrame* input, HANDLE stop)
 {
+    if (!m_voice)
+        return E_FAIL;
     if (!m_resample)
     {
         if (!input)

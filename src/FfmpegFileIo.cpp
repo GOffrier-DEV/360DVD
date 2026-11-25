@@ -123,14 +123,18 @@ namespace
     pci_t* PresentedMenuPci(FileInput& input, int64_t videoPts)
     {
         if (input.menu.stillSeconds) return &input.menuPci;
-        if (videoPts < 0) return NULL;
+        if (videoPts < 0 || static_cast<uint64_t>(videoPts) > UINT32_MAX) return NULL;
         const uint32_t pts = static_cast<uint32_t>(videoPts);
         const unsigned capacity = ARRAYSIZE(input.menuHistory);
         for (unsigned i = 1; i <= input.menuHistoryCount; ++i)
         {
             pci_t& pci = input.menuHistory[(input.menuHistoryHead + capacity - i) % capacity];
             const uint32_t start = pci.pci_gi.vobu_s_ptm;
-            if (pts - start < pci.pci_gi.vobu_e_ptm - start) return &pci;
+            const uint32_t duration = pci.pci_gi.vobu_e_ptm - start;
+            // PTM values are 32-bit wrapping counters; reject corrupt or
+            // implausibly long ranges rather than accepting arbitrary wraps.
+            if (duration && duration < 0x80000000u &&
+                static_cast<uint32_t>(pts - start) < duration) return &pci;
         }
         return NULL;
     }
@@ -241,6 +245,11 @@ namespace
                 input.navNeedsAck = input.navWaiting;
                 if (event == DVDNAV_STILL_FRAME)
                 {
+                    if (length < static_cast<int32_t>(sizeof(dvdnav_still_event_t)))
+                    {
+                        input.navTerminal = AVERROR(EIO);
+                        continue;
+                    }
                     dvdnav_still_event_t still;
                     memcpy(&still, sector, sizeof(still));
                     char message[96];

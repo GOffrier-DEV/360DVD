@@ -170,7 +170,9 @@ bool DvdLogoBounce::LoadLogoTexture()
     const DWORD compression = ok ? ReadLittleEndian32(infoHeader + 16) : 0;
 
     if (type != 0x4D42 || infoSize < 40 ||
-        bitmapWidth <= 0 || bitmapHeight == 0 || planes != 1 ||
+        bitmapWidth <= 0 || bitmapWidth > 2048 ||
+        bitmapHeight == 0 || bitmapHeight == LONG_MIN ||
+        bitmapHeight > 2048 || bitmapHeight < -2048 || planes != 1 ||
         bitCount != 32 || compression != 0)
     {
         StartupLog("Unsupported or invalid BMP header");
@@ -181,6 +183,13 @@ bool DvdLogoBounce::LoadLogoTexture()
     const int height = (int)(bitmapHeight < 0 ? -bitmapHeight : bitmapHeight);
     const bool topDown = bitmapHeight < 0;
     const DWORD rowBytes = (DWORD)width * 4;
+    if (rowBytes > UINT_MAX / (DWORD)height)
+        return false;
+    const DWORD imageBytes = rowBytes * (DWORD)height;
+    if (pixelOffset > size || imageBytes > size - pixelOffset)
+        return false;
+    if (pixelOffset < 14 + infoSize)
+        return false;
 
     HRESULT hr = m_device->CreateTexture(width, height, 1, 0, D3DFMT_LIN_A8R8G8B8,
                                          D3DPOOL_DEFAULT, &m_texture, NULL);
@@ -197,8 +206,7 @@ bool DvdLogoBounce::LoadLogoTexture()
         return false;
     }
 
-    const DWORD imageBytes = rowBytes * (DWORD)height;
-    if (pixelOffset > size || imageBytes > size - pixelOffset)
+    if (locked.Pitch < 0 || (DWORD)locked.Pitch < rowBytes)
     {
         m_texture->UnlockRect(0);
         return false;

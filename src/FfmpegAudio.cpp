@@ -67,6 +67,11 @@ void FfmpegAudio::Finish()
     InterlockedExchange(&m_finished, 1);
 }
 
+HRESULT FfmpegAudio::SetPaused(bool paused)
+{
+    return paused ? m_voice->Stop(0) : m_voice->Start(0);
+}
+
 double FfmpegAudio::Advance(double fallback, bool videoBackpressure)
 {
     XAUDIO2_VOICE_STATE state;

@@ -12,6 +12,9 @@ public:
     HRESULT Load(IDirect3DDevice9* device, HANDLE file);
     HRESULT DecodeMpeg2(IDirect3DDevice9* device, HANDLE file);
     HRESULT StartEmbeddedAudio();
+    HRESULT SetEmbeddedAudioPaused(bool paused);
+    double DurationSeconds() const;
+    float DisplayAspect() const;
     double AdvanceEmbeddedAudio(double fallback);
     bool EmbeddedAudioState(double& milliseconds, unsigned& buffers) const;
     void StartupVideoBuffer(unsigned& queued, unsigned& target, unsigned& budget) const;
@@ -44,7 +47,8 @@ public:
     unsigned ReadBytes() const { return m_readBytes; }
     double UploadMilliseconds() const;
     double GpuWaitMilliseconds() const;
-    HRESULT Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const;
+    HRESULT Draw(IDirect3DDevice9* device, unsigned width, unsigned height,
+                 unsigned displayMode = 0) const;
 
 private:
     struct QueuedFrame;

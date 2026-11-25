@@ -73,6 +73,23 @@ with the scalar build using the same VOB.
 
 ## Playback acceptance
 
+### On-screen playback controls
+
+Press a controller button during file playback to show the overlay.
+Use D-pad Left/Right to select **Play/Pause** or **Display**, **A** to
+activate, **B** to dismiss, or **Start** to toggle pause directly.
+The overlay hides after four seconds of inactivity while playing.
+Elapsed time follows the playback clock; remaining time appears when
+FFmpeg reports a duration. Display cycles through Auto, Letterbox,
+Fullscreen (crop to fill), Stretch, Native, and Letterbox Zoom (for 4:3
+transfers with baked-in widescreen bars). Auto and Letterbox both preserve
+the source aspect ratio. Fullscreen and Stretch also look the same as Auto
+when the source and output already match. The boot log reports both ratios.
+
+This overlay controls the MPEG-2/VOB fixture player. DVD menus, chapter
+navigation, scan/seek, alternate audio/subtitle selection, and resume
+bookmarks are not implemented by this playback path.
+
 For an affinity A/B test, run the same XEX and VOB with and without an
 empty `playback-affinity.enable` beside the XEX. The marker requests
 hardware threads 5 (render), 2 (decode), and 0 (reader), with unchanged
@@ -106,8 +123,10 @@ single-threaded and its refill policy is unchanged.
   packets. Read-ahead is limited to 96 packets and stops once queued
   video payload reaches the lesser of 4 MiB and 1/32 of the available
   physical RAM sampled at startup. Clock recovery remains a fallback.
-  Pacing samples stay in RAM during playback. The CSV and summary log
-  are written at the end, so disk logging does not stall the render loop.
+  Pacing samples stay in RAM during playback. A background logger writes
+  progress to `360DVD.log` about every two seconds, including while paused.
+  The render thread never waits for a progress write. The full CSV and
+  summary are written when playback ends.
   Check `audio_recovery_ticks` in the trace and `video_packet_peak` in
   the summary log. If video gets behind, it skips expired frames. Initial
   A/V timestamp offsets and discontinuities are not yet compensated.

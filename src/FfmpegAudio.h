@@ -17,6 +17,7 @@ public:
     HRESULT Open(const AVStream& stream);
     HRESULT Decode(const AVPacket* packet, HANDLE stop);
     HRESULT Start();
+    HRESULT SetPaused(bool paused);
     void Finish();
     double Advance(double fallback, bool videoBackpressure);
     unsigned RecoveryTicks() const { return m_recoveryTicks; }

@@ -113,6 +113,7 @@
   <ItemGroup Condition="'$(FfmpegBuildDir)' != ''">
     <ClCompile Include="src\FfmpegFileIo.cpp" />
     <ClCompile Include="src\FfmpegThreadPlatform.cpp" />
+    <ClCompile Include="src\PlaybackOsd.cpp" />
     <ClCompile Include="src\FfmpegAudio.cpp" />
     <ClCompile Include="src\FfmpegVobProbe.cpp" Condition="'$(FfmpegProbe)' == 'True'" />
   </ItemGroup>

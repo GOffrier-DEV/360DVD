@@ -94,6 +94,8 @@ struct DvdFrameProbe::Decoder
     AVPacket* packet;
     int video;
     double frameRate;
+    double duration;
+    float displayAspect;
     FfmpegAudio* audio;
     int audioStream;
     bool audioFailed;
@@ -517,6 +519,11 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         if (!d.codec || !d.decoded || !d.packet)
             return E_OUTOFMEMORY;
         AVStream* video = d.format->streams[d.video];
+        d.duration = d.format->duration > 0 ? d.format->duration / double(AV_TIME_BASE) : 0;
+        const AVRational sar = av_guess_sample_aspect_ratio(d.format, video, NULL);
+        if (sar.num > 0 && sar.den > 0 && video->codecpar->width > 0 && video->codecpar->height > 0)
+            d.displayAspect = static_cast<float>(av_q2d(sar) * video->codecpar->width /
+                                                  video->codecpar->height);
         d.frameRate = av_q2d(av_guess_frame_rate(d.format, video, NULL));
         // Target 750 ms of compressed video. Use the mux rate as an upper
         // estimate if the video rate is unknown, then fall back to 6 Mb/s.
@@ -654,6 +661,22 @@ HRESULT DvdFrameProbe::StartEmbeddedAudio()
     return m_decoder && m_decoder->audio ? m_decoder->audio->Start() : S_FALSE;
 }
 
+HRESULT DvdFrameProbe::SetEmbeddedAudioPaused(bool paused)
+{
+    return m_decoder && m_decoder->audio ? m_decoder->audio->SetPaused(paused) : E_FAIL;
+}
+
+double DvdFrameProbe::DurationSeconds() const
+{
+    return m_decoder ? m_decoder->duration : 0;
+}
+
+float DvdFrameProbe::DisplayAspect() const
+{
+    return m_decoder && m_decoder->displayAspect > 0
+        ? m_decoder->displayAspect : 4.0f / 3.0f;
+}
+
 double DvdFrameProbe::AdvanceEmbeddedAudio(double fallback)
 {
     return m_decoder && m_decoder->audio
@@ -747,15 +770,45 @@ HRESULT DvdFrameProbe::LoadPlanes(IDirect3DDevice9* device, unsigned width, unsi
     return device->CreateVertexDeclaration(elements, &m_decl);
 }
 
-HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height) const
+HRESULT DvdFrameProbe::Draw(IDirect3DDevice9* device, unsigned width, unsigned height,
+                            unsigned displayMode) const
 {
-    // The smoke-test fixture is displayed as 4:3, independent of coded size.
     const float aspect = (float)width / height;
-    const float x = aspect > 4.0f / 3.0f ? (4.0f / 3.0f) / aspect : 1.0f;
-    const float y = aspect < 4.0f / 3.0f ? aspect / (4.0f / 3.0f) : 1.0f;
+    const float sourceAspect = DisplayAspect();
+    float x = aspect > sourceAspect ? sourceAspect / aspect : 1.0f;
+    float y = aspect < sourceAspect ? aspect / sourceAspect : 1.0f;
+    float u = 0, v = 0;
+    if (displayMode == 2) // Fullscreen: fill without distortion, cropping the excess.
+    {
+        u = (1 - y) / 2;
+        v = (1 - x) / 2;
+        x = y = 1;
+    }
+    else if (displayMode == 3)
+        x = y = 1;
+    else if (displayMode == 4)
+    {
+        x = (float)m_width / width;
+        y = (float)m_height / height;
+        const float scale = x > y ? x : y;
+        if (scale > 1) { x /= scale; y /= scale; }
+    }
+    else if (displayMode == 5)
+    {
+        // Enlarge a 4:3 letterboxed transfer uniformly to remove baked-in
+        // 16:9 mattes; crop the sides too if the output is narrower.
+        const float zoom = (16.0f / 9.0f) / (4.0f / 3.0f);
+        if (sourceAspect < 1.4f)
+        {
+            x *= zoom;
+            y *= zoom;
+            if (x > 1) { u = (1 - 1 / x) / 2; x = 1; }
+            if (y > 1) { v = (1 - 1 / y) / 2; y = 1; }
+        }
+    }
     const float vertices[][6] = {
-        {-x,  y, 0, 1, 0, 0}, {x,  y, 0, 1, 1, 0},
-        {-x, -y, 0, 1, 0, 1}, {x, -y, 0, 1, 1, 1}
+        {-x,  y, 0, 1, u, v}, {x,  y, 0, 1, 1-u, v},
+        {-x, -y, 0, 1, u, 1-v}, {x, -y, 0, 1, 1-u, 1-v}
     };
     device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     device->SetRenderState(D3DRS_ZENABLE, FALSE);

@@ -7,6 +7,7 @@
 #include "DvdLogoBounce.h"
 #include "DvdFrameProbe.h"
 #include "PlaybackAffinity.h"
+#include "PlaybackOsd.h"
 #include "XboxDvdStream.h"
 #include <dvdread/dvd_udf.h>
 #include <limits.h>
@@ -73,6 +74,7 @@ namespace
         }
 
         HRESULT Start() { return voice->Start(0); }
+        HRESULT SetPaused(bool paused) { return paused ? voice->Stop(0) : voice->Start(0); }
         double Advance(bool& drained)
         {
             XAUDIO2_VOICE_STATE state;
@@ -112,7 +114,7 @@ namespace
 
     void BootLog(const char* message, HRESULT result = S_OK)
     {
-        char line[160];
+        char line[320];
         sprintf_s(line, sizeof(line), "%s (status=0x%08X)\r\n",
                   message, (unsigned int)result);
         OutputDebugStringA(line);
@@ -132,6 +134,81 @@ namespace
             CloseHandle(file);
         }
     }
+
+    class PlaybackLog
+    {
+    public:
+        PlaybackLog() : wake(NULL), thread(NULL), pending(false), stopping(false) {}
+
+        void Open()
+        {
+            InitializeCriticalSection(&lock);
+            wake = CreateEvent(NULL, FALSE, FALSE, NULL);
+            if (wake)
+                thread = CreateThread(NULL, 0, Run, this, 0, NULL);
+            if (!thread)
+            {
+                if (wake) CloseHandle(wake);
+                DeleteCriticalSection(&lock);
+                BootLog("Live playback logger unavailable", E_FAIL);
+            }
+        }
+
+        void Publish(const char* text, HRESULT status = S_OK)
+        {
+            // Keep only the latest snapshot rather than backing up playback.
+            if (!thread || !TryEnterCriticalSection(&lock))
+                return;
+            strcpy_s(message, sizeof(message), text);
+            result = status;
+            pending = true;
+            LeaveCriticalSection(&lock);
+            SetEvent(wake);
+        }
+
+        void Close()
+        {
+            if (!thread) return;
+            EnterCriticalSection(&lock);
+            stopping = true;
+            LeaveCriticalSection(&lock);
+            SetEvent(wake);
+            WaitForSingleObject(thread, INFINITE);
+            CloseHandle(thread);
+            CloseHandle(wake);
+            DeleteCriticalSection(&lock);
+            thread = NULL;
+        }
+
+    private:
+        static DWORD WINAPI Run(void* context)
+        {
+            PlaybackLog& log = *static_cast<PlaybackLog*>(context);
+            while (WaitForSingleObject(log.wake, INFINITE) == WAIT_OBJECT_0)
+            {
+                char text[sizeof(log.message)];
+                EnterCriticalSection(&log.lock);
+                const bool write = log.pending;
+                const bool stop = log.stopping;
+                const HRESULT status = write ? log.result : S_OK;
+                if (write)
+                    strcpy_s(text, sizeof(text), log.message);
+                log.pending = false;
+                LeaveCriticalSection(&log.lock);
+                if (write)
+                    BootLog(text, status);
+                if (stop)
+                    break;
+            }
+            return 0;
+        }
+
+        CRITICAL_SECTION lock;
+        HANDLE wake, thread;
+        char message[256];
+        HRESULT result;
+        bool pending, stopping;
+    };
 
     void ProbeLog(const char* stage, LONG status = 0,
                   const char* path = "game:\\360DVD-probe.log")
@@ -572,10 +649,30 @@ namespace
             CloseHandle(probeThread);
         else
             ProbeLog("thread creation failed", GetLastError());
+        static PlaybackOsd osd;
+        const HRESULT osdStatus = showFrame && compressed ? osd.Open(device) : S_FALSE;
+        const bool osdReady = osdStatus == S_OK;
+        if (FAILED(osdStatus))
+            BootLog("Playback overlay unavailable", osdStatus);
+        if (osdReady)
+        {
+            char display[128];
+            sprintf_s(display, sizeof(display), "Playback display: output=%ux%u source_aspect=%.3f",
+                      present.BackBufferWidth, present.BackBufferHeight, frame.DisplayAspect());
+            BootLog(display);
+        }
+        bool paused = false;
+        unsigned displayMode = 0;
+        double playbackSeconds = 0;
+        const double playbackDuration = frame.DurationSeconds();
         LARGE_INTEGER frequency;
         LARGE_INTEGER previous;
         QueryPerformanceFrequency(&frequency);
+        PlaybackLog playbackLog;
+        if (showFrame && compressed)
+            playbackLog.Open();
         QueryPerformanceCounter(&previous);
+        LONGLONG nextProgress = previous.QuadPart + 2 * frequency.QuadPart;
         unsigned presentedFrames = 0;
         unsigned lastPresented = 0;
         unsigned missedFrames = 0;
@@ -597,15 +694,34 @@ namespace
             previous = now;
 
             bool playbackEnded = false;
+            bool resumed = false;
+            if (osdReady && capture && showFrame && playbackClockStarted)
+            {
+                const PlaybackOsd::Action action = osd.Update(elapsed, paused);
+                if (action == PlaybackOsd::TogglePause)
+                {
+                    const HRESULT result = embeddedAudio ? frame.SetEmbeddedAudioPaused(!paused)
+                        : audioMaster ? audio.SetPaused(!paused) : S_OK;
+                    if (SUCCEEDED(result))
+                    {
+                        paused = !paused;
+                        resumed = !paused;
+                    }
+                }
+                else if (action == PlaybackOsd::DisplayMode)
+                    displayMode = (displayMode + 1) % PlaybackOsd::DisplayModeCount;
+            }
             const unsigned queueBefore = capture ? frame.QueueDepth() : 0;
             const unsigned frameBefore = frame.FramesReady();
             HRESULT advanceStatus = S_OK;
-            if (showFrame && compressed && playbackClockStarted)
+            if (showFrame && compressed && playbackClockStarted && !paused)
             {
                 const unsigned before = frame.FramesReady();
                 bool drained = false;
-                const double videoElapsed = embeddedAudio ? frame.AdvanceEmbeddedAudio(elapsed)
-                    : audioMaster ? audio.Advance(drained) : elapsed;
+                const double fallback = resumed ? 0.0 : elapsed;
+                const double videoElapsed = embeddedAudio ? frame.AdvanceEmbeddedAudio(fallback)
+                    : audioMaster ? audio.Advance(drained) : fallback;
+                playbackSeconds += videoElapsed;
                 const HRESULT status = frame.Advance(device, videoElapsed, embeddedAudio || audioMaster);
                 if (drained)
                 {
@@ -636,7 +752,10 @@ namespace
                 if (showFrame)
                 {
                     drewVideo = SUCCEEDED(frame.Draw(device, present.BackBufferWidth,
-                                                    present.BackBufferHeight));
+                                                     present.BackBufferHeight, displayMode));
+                    if (osdReady && capture && !playbackEnded)
+                        osd.Draw(device, present.BackBufferWidth, present.BackBufferHeight,
+                                 paused, displayMode, playbackSeconds, playbackDuration);
                 }
                 else
                     animation.Render();
@@ -688,6 +807,8 @@ namespace
                     if (!audioMaster)
                         audio.Close();
                 }
+                if (audioStartLog[0])
+                    playbackLog.Publish(audioStartLog, audioStartStatus);
             }
             if (compressed && drewVideo && SUCCEEDED(presentStatus) &&
                 lastPresented != frame.FramesReady())
@@ -695,7 +816,7 @@ namespace
                 lastPresented = frame.FramesReady();
                 ++presentedFrames;
             }
-            if (capture)
+            if (capture && !paused)
             {
                 if (traceCount < sizeof(pacingTrace) / sizeof(pacingTrace[0]))
                 {
@@ -733,13 +854,23 @@ namespace
                 else
                     ++traceOmitted;
             }
+            if (capture && !playbackEnded && now.QuadPart >= nextProgress)
+            {
+                nextProgress = now.QuadPart + 2 * frequency.QuadPart;
+                char progress[256];
+                sprintf_s(progress, sizeof(progress),
+                          "Playback: %s time=%.3fs presented=%u queue=%u underruns=%u expired=%u audio_ms=%.1f audio_buffers=%u recovery=%u display=%u",
+                          paused ? "paused" : "playing", playbackSeconds, presentedFrames,
+                          frame.QueueDepth(), frame.Underruns(), frame.AudioSyncDrops(),
+                          embeddedMs, audioBuffers, frame.AudioRecoveryTicks(), displayMode);
+                playbackLog.Publish(progress);
+            }
             if (playbackEnded)
             {
                 capture = false;
                 audio.Close();
                 audioMaster = false;
-                if (audioStartLog[0])
-                    BootLog(audioStartLog, audioStartStatus);
+                playbackLog.Close();
                 if (pcmDrained)
                     BootLog("PCM drained; continuing on performance counter");
                 WritePacingTrace(traceCount, traceOmitted);

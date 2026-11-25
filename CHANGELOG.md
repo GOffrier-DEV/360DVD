@@ -3,6 +3,26 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-25
+
+### Added
+
+- Chapter navigation and 10-second backward/forward skips from the Blades
+  playback controls. Time seeking is available within the current DVD PGC;
+  menus and still frames do not support seeking.
+
+### Improved
+
+- Lossless DVD bitmap subtitle batching merges identical adjacent row-runs,
+  reducing geometry and draw batches without changing subtitle pixels.
+
+### Fixed
+
+- Hardened DVD navigation event handling and read-ahead allocation against
+  malformed disc data.
+- Added defensive checks for partial audio initialization and embedded XUI
+  resource-reader calls.
+
 ## [1.0.0] - 2026-11-24
 
 First release: a DVD player for RGH/JTAG Xbox 360 consoles.
@@ -34,7 +54,8 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 
 ### Known limitations
 
-- Scan/seek, resume bookmarks, and CD playback are not implemented.
+- Resume bookmarks and CD playback are not implemented. Time seeking is
+  limited to the current DVD PGC and is unavailable in menus or still frames.
 - Motion compensation remains scalar; only the IDCT uses VMX.
 
 ### Dependencies
@@ -46,3 +67,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
   AC-3, MP2, LPCM, and DTS support.
 
 [1.0.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.0.0
+[1.1.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.1.0

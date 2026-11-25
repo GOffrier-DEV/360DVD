@@ -71,9 +71,11 @@ To select audio at startup, put a one-based supported audio track number in
 `audio-track.txt` beside the XEX. Remove the file to use FFmpeg's preferred
 track.
 
-The overlay controls optical DVD playback. Menu buttons, live audio-track
-switching, subtitles, and the display/zoom modes are implemented. Scan/seek,
-resume bookmarks, and CD playback are not.
+The overlay controls optical DVD playback. Menu buttons, chapter navigation,
+10-second backward/forward skips, live audio-track switching, subtitles, and
+the display/zoom modes are implemented. Seek skips are limited to the current
+DVD title/PGC; authored menus and still frames do not support time seeking.
+Resume bookmarks and CD playback are not implemented.
 
 ## Audio and pacing
 

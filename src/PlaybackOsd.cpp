@@ -316,7 +316,11 @@ PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused, bool discBu
         if (wasVisible && (pressed & XINPUT_GAMEPAD_A))
         {
             if (!m_selected) action = TogglePause;
+            else if (!m_stockPage && m_selected == 1) action = PreviousChapter;
+            else if (!m_stockPage && m_selected == 2) action = SeekBackward;
             else if (!m_stockPage && m_selected == 3) action = Stop;
+            else if (!m_stockPage && m_selected == 4) action = SeekForward;
+            else if (!m_stockPage && m_selected == 5) action = NextChapter;
             else if (!m_stockPage && m_selected == 6) action = DiscRoot;
             else if (!m_stockPage && m_selected == 7) action = DiscTitle;
             else if (m_selected == 8) { m_stockPage ^= 1; m_selected = 0; m_stockInfo = false; }
@@ -389,6 +393,17 @@ void PlaybackOsd::DrawBitmap(IDirect3DDevice9* device, float x, float y, float s
                               const BYTE* palette, unsigned colors)
 {
     m_count = 0;
+    if (!width || !height || !pixels || !palette || pitch == 0)
+        return;
+
+    // Decode the palette once per bitmap. Keep the original row-local run
+    // geometry: vertical coalescing can change edge rasterization on D3D9.
+    DWORD paletteColors[256] = {};
+    const unsigned paletteCount = colors < ARRAYSIZE(paletteColors)
+        ? colors : ARRAYSIZE(paletteColors);
+    for (unsigned i = 0; i < paletteCount; ++i)
+        memcpy(&paletteColors[i], palette + i * sizeof(DWORD), sizeof(DWORD));
+
     for (unsigned row = 0; row < height; ++row)
     {
         const BYTE* line = pixels + static_cast<int>(row) * pitch;
@@ -398,12 +413,10 @@ void PlaybackOsd::DrawBitmap(IDirect3DDevice9* device, float x, float y, float s
             unsigned end = col + 1;
             while (end < width && line[end] == index)
                 ++end;
-            DWORD color = 0;
-            if (index < colors)
-                memcpy(&color, palette + index * sizeof(color), sizeof(color));
+            const DWORD color = index < paletteCount ? paletteColors[index] : 0;
             if (color >> 24)
             {
-                if (m_count + 6 > sizeof(m_vertices) / sizeof(*m_vertices))
+                if (m_count + 6 > ARRAYSIZE(m_vertices))
                     Submit(device);
                 Rect(x + col * sx, y + row * sy, (end - col) * sx, sy, color);
             }

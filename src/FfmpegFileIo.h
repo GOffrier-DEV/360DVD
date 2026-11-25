@@ -4,7 +4,9 @@
 
 struct AVIOContext;
 enum DvdMenuCommand { DvdMenuNone, DvdMenuUp, DvdMenuDown, DvdMenuLeft, DvdMenuRight,
-                      DvdMenuActivate, DvdMenuRoot, DvdMenuTitle, DvdMenuContinue };
+                      DvdMenuActivate, DvdMenuRoot, DvdMenuTitle, DvdMenuContinue,
+                      DvdMenuPreviousChapter, DvdMenuNextChapter,
+                      DvdMenuSeekBackward, DvdMenuSeekForward };
 struct DvdMenuState
 {
     unsigned stillSeconds;

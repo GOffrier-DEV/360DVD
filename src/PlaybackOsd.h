@@ -9,7 +9,7 @@ class PlaybackOsd
 public:
     enum { SceneWidth = 720, SceneHeight = 480 };
     enum Action { None, TogglePause, DisplayMode, SubtitleTrack, ToggleZoom, NextAudioTrack,
-                  Stop,
+                  Stop, PreviousChapter, NextChapter, SeekBackward, SeekForward,
                   DiscUp, DiscDown, DiscLeft, DiscRight, DiscActivate, DiscRoot, DiscTitle, DiscContinue };
     enum { DisplayModeCount = 6 };
     enum { StockZoomMode = DisplayModeCount };

@@ -309,25 +309,59 @@ namespace
     {
         const bool still = input.menu.stillSeconds != 0;
         int32_t button = 0;
-        if (HasMenuButtons(&pci)) button = dvdnav_xbox_selected_button(input.nav);
         dvdnav_status_t result = DVDNAV_STATUS_ERR;
-        if (command == DvdMenuRoot || command == DvdMenuTitle)
-            result = dvdnav_menu_call(input.nav, command == DvdMenuRoot ? DVD_MENU_Root : DVD_MENU_Title);
-        else if (command == DvdMenuContinue && still)
-            result = dvdnav_still_skip(input.nav);
-        else if (HasMenuButtons(&pci))
+        const bool seekAction = command == DvdMenuPreviousChapter ||
+            command == DvdMenuNextChapter || command == DvdMenuSeekBackward ||
+            command == DvdMenuSeekForward;
+        if (seekAction)
         {
-            const int target = VisibleMenuButton(pci, button);
-            if (target != button && dvdnav_button_select(input.nav, &pci, target) == DVDNAV_STATUS_OK)
-                button = target;
-            switch (command)
+            int32_t title = 0, part = 0;
+            if (dvdnav_current_title_info(input.nav, &title, &part) == DVDNAV_STATUS_OK &&
+                title > 0)
             {
-            case DvdMenuUp: result = dvdnav_upper_button_select(input.nav, &pci); break;
-            case DvdMenuDown: result = dvdnav_lower_button_select(input.nav, &pci); break;
-            case DvdMenuLeft: result = dvdnav_left_button_select(input.nav, &pci); break;
-            case DvdMenuRight: result = dvdnav_right_button_select(input.nav, &pci); break;
-            case DvdMenuActivate: result = dvdnav_button_activate(input.nav, &pci); break;
-            default: break;
+                if (command == DvdMenuPreviousChapter)
+                    result = dvdnav_prev_pg_search(input.nav);
+                else if (command == DvdMenuNextChapter)
+                    result = dvdnav_next_pg_search(input.nav);
+                else
+                {
+                    const int64_t now = dvdnav_get_current_time(input.nav);
+                    const int64_t delta = 10 * 90000LL;
+                    if (now >= 0)
+                    {
+                        const uint64_t target = command == DvdMenuSeekBackward
+                            ? static_cast<uint64_t>(now > delta ? now - delta : 0)
+                            : static_cast<uint64_t>(now) + delta;
+                        // Search the current PGC rather than only its current
+                        // program so a skip can cross chapter boundaries.
+                        dvdnav_set_PGC_positioning_flag(input.nav, 1);
+                        result = dvdnav_time_search(input.nav, target);
+                        dvdnav_set_PGC_positioning_flag(input.nav, 0);
+                    }
+                }
+            }
+        }
+        else
+        {
+            if (HasMenuButtons(&pci)) button = dvdnav_xbox_selected_button(input.nav);
+            if (command == DvdMenuRoot || command == DvdMenuTitle)
+                result = dvdnav_menu_call(input.nav, command == DvdMenuRoot ? DVD_MENU_Root : DVD_MENU_Title);
+            else if (command == DvdMenuContinue && still)
+                result = dvdnav_still_skip(input.nav);
+            else if (HasMenuButtons(&pci))
+            {
+                const int target = VisibleMenuButton(pci, button);
+                if (target != button && dvdnav_button_select(input.nav, &pci, target) == DVDNAV_STATUS_OK)
+                    button = target;
+                switch (command)
+                {
+                case DvdMenuUp: result = dvdnav_upper_button_select(input.nav, &pci); break;
+                case DvdMenuDown: result = dvdnav_lower_button_select(input.nav, &pci); break;
+                case DvdMenuLeft: result = dvdnav_left_button_select(input.nav, &pci); break;
+                case DvdMenuRight: result = dvdnav_right_button_select(input.nav, &pci); break;
+                case DvdMenuActivate: result = dvdnav_button_activate(input.nav, &pci); break;
+                default: break;
+                }
             }
         }
         char message[128];
@@ -340,7 +374,7 @@ namespace
             LogDvdNavStartup(dvdnav_err_to_string(input.nav));
             return;
         }
-        if (command == DvdMenuContinue || command == DvdMenuRoot || command == DvdMenuTitle ||
+        if (seekAction || command == DvdMenuContinue || command == DvdMenuRoot || command == DvdMenuTitle ||
             dvdnav_xbox_menu_transition(input.nav, still))
         {
             UpdateMenu(input, NULL, 0);
@@ -389,7 +423,9 @@ namespace
             if (input.menuCommand != DvdMenuNone)
             {
                 const DvdMenuCommand command = input.menuCommand;
-                pci_t pci = input.menuCommandPci;
+                pci_t pci = {};
+                if (command >= DvdMenuUp && command <= DvdMenuActivate)
+                    pci = input.menuCommandPci;
                 input.menuCommand = DvdMenuNone;
                 input.menuCommandRunning = true;
                 LeaveCriticalSection(&input.lock);

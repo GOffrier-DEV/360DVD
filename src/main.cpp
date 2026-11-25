@@ -608,6 +608,14 @@ namespace
                     showFrame = false;
                     frame.Stop();
                 }
+                else if (action == PlaybackOsd::PreviousChapter)
+                    frame.DiscMenuInput(DvdMenuPreviousChapter);
+                else if (action == PlaybackOsd::NextChapter)
+                    frame.DiscMenuInput(DvdMenuNextChapter);
+                else if (action == PlaybackOsd::SeekBackward)
+                    frame.DiscMenuInput(DvdMenuSeekBackward);
+                else if (action == PlaybackOsd::SeekForward)
+                    frame.DiscMenuInput(DvdMenuSeekForward);
                 else if (action == PlaybackOsd::DisplayMode)
                     displayMode = (displayMode + 1) % PlaybackOsd::DisplayModeCount;
                 else if (action == PlaybackOsd::ToggleZoom)

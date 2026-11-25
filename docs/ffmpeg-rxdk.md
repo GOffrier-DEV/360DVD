@@ -1,7 +1,8 @@
 # FFmpeg on RXDK
 
 `deps/ffmpeg` pins FFmpeg 9.1 (`n9.1`). The LGPL-only build includes MPEG-2
-video and the elementary-stream and MPEG program-stream (VOB) demuxers.
+video and the elementary-stream and MPEG program-stream (VOB) demuxers, plus
+the `bwdif` deinterlacing filter.
 The VOB demuxer recognizes Dolby Digital (AC-3), MPEG Layer II (MP2),
 DVD-Video LPCM, and DTS tracks. The build includes their decoders and
 the AC-3, MPEG audio, and DTS parsers. The player uses FFmpeg for video
@@ -18,7 +19,7 @@ not affect configure.
 
 After configure, run `make -C build/ffmpeg-rxdk -j8`. This produces
 `libavformat/libavformat.a`, `libavcodec/libavcodec.a`,
-`libswresample/libswresample.a`, and
+`libswresample/libswresample.a`, `libavfilter/libavfilter.a`, and
 `libavutil/libavutil.a` under the build directory. The scalar baseline has no
 FFmpeg threading or built-in I/O protocols: keep FFmpeg calls on one
 playback worker and use custom AVIO for input.
@@ -46,6 +47,11 @@ rounding shifts, and a saturating pack, and Xenon IDCT is enabled by default
 in this build. No files in the FFmpeg source tree are patched.
 
 ## Playback controls
+
+Interlaced video uses FFmpeg `bwdif` with automatic field order and field-rate
+output (normally 50 or 59.94 pictures per second, subject to display refresh).
+Progressive video is not deinterlaced. Once the filter is active, it buffers
+one input picture for lookahead; DVD navigation resets that history.
 
 During a DVD menu, the D-pad moves the disc highlight and **A** activates the
 selected button or continues a still. **Start** or **Back** opens the

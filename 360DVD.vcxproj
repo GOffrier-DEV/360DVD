@@ -109,8 +109,13 @@
       <AdditionalIncludeDirectories>$(EmbeddedResourceDir);$(FfmpegBuildDir);$(FfmpegSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(FfmpegBuildDir)\libavfilter\libavfilter.a;$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(VideoPerfLogging)' == 'true'">
+    <ClCompile>
+      <PreprocessorDefinitions>DVD360_PERF_LOGGING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup Condition="'$(FfmpegBuildDir)' != ''">
     <ClCompile Include="src\FfmpegFileIo.cpp" />

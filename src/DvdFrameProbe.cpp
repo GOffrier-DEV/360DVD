@@ -15,12 +15,25 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 }
 
 namespace
 {
     const unsigned kWidth = 720;
     const unsigned kHeight = 576;
+    HRESULT VideoPipelineError(const char* stage, int error)
+    {
+#ifdef DVD360_LOGGING
+        char message[160], detail[64];
+        av_strerror(error, detail, sizeof(detail));
+        sprintf_s(message, sizeof(message), "Video %s: %s (%d)", stage, detail, error);
+        LogDvdNavStartup(message);
+#endif
+        return E_FAIL;
+    }
     const char* kVs =
         "struct V { float4 p : POSITION; float2 uv : TEXCOORD0; };"
         "V main(V v) { return v; }";
@@ -73,8 +86,10 @@ struct DvdFrameProbe::QueuedFrame
     BYTE pixels[kWidth * kHeight * 3 / 2];
     unsigned width, height, calls;
     double duration;
+    bool filtered;
+    bool deinterlaced;
     LONGLONG parseTicks, readTicks, inputWaitTicks;
-    LONGLONG decodeTicks, copyTicks;
+    LONGLONG decodeTicks, copyTicks, bwdifTicks;
     LONGLONG audioWorkTicks;
     unsigned videoPacketHighWater;
     double decodeCpuMs;
@@ -94,6 +109,10 @@ struct DvdFrameProbe::Decoder
     AVFormatContext* format;
     AVCodecContext* codec;
     AVFrame* decoded;
+    AVFilterGraph* videoFilter;
+    AVFilterContext *videoSource, *videoSink;
+    bool videoFilterEnded, disableDeinterlace;
+    int OpenVideoFilter(const AVFrame& frame, AVRational timeBase);
     AVPacket* packet;
     int video;
     double frameRate;
@@ -147,6 +166,33 @@ struct DvdFrameProbe::Decoder
     enum { QueueCapacity = 6 };
     QueuedFrame queue[QueueCapacity];
 };
+
+int DvdFrameProbe::Decoder::OpenVideoFilter(const AVFrame& frame, AVRational timeBase)
+{
+    videoFilter = avfilter_graph_alloc();
+    if (!videoFilter) return AVERROR(ENOMEM);
+    videoFilter->nb_threads = 2;
+    AVFilterContext* bwdif = NULL;
+    const AVRational sar = frame.sample_aspect_ratio.den > 0
+        ? frame.sample_aspect_ratio : av_make_q(0, 1);
+    char args[160];
+    sprintf_s(args, sizeof(args),
+        "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+        frame.width, frame.height, frame.format, timeBase.num, timeBase.den,
+        sar.num, sar.den);
+    int status = avfilter_graph_create_filter(&videoSource, avfilter_get_by_name("buffer"),
+                                             "dvd_in", args, NULL, videoFilter);
+    if (status >= 0)
+        status = avfilter_graph_create_filter(&bwdif, avfilter_get_by_name("bwdif"),
+            "dvd_bwdif", "mode=send_field:parity=auto:deint=interlaced", NULL, videoFilter);
+    if (status >= 0)
+        status = avfilter_graph_create_filter(&videoSink, avfilter_get_by_name("buffersink"),
+                                             "dvd_out", NULL, NULL, videoFilter);
+    if (status >= 0) status = avfilter_link(videoSource, 0, bwdif, 0);
+    if (status >= 0) status = avfilter_link(bwdif, 0, videoSink, 0);
+    if (status >= 0) status = avfilter_graph_config(videoFilter, NULL);
+    return status;
+}
 
 void DvdFrameProbe::Decoder::DecodeAudioPacket(AVPacket* packet)
 {
@@ -319,13 +365,14 @@ void DvdFrameProbe::Decoder::PumpPacket()
 }
 
 DvdFrameProbe::DvdFrameProbe()
-    : m_decoder(NULL), m_width(0), m_height(0), m_discSegment(0), m_untilNext(0),
+    : m_decoder(NULL), m_width(0), m_height(0), m_discSegment(0),
+      m_deinterlacingActive(false), m_untilNext(0),
       m_framesReady(0), m_lateByFrame(0), m_audioSyncDrops(0), m_videoPacketHighWater(0),
       m_audioWorkTicks(0), m_maxLate(0),
       m_parseCalls(0), m_parseTicks(0), m_parseFrequency(0),
       m_readTicks(0), m_uploadTicks(0), m_gpuWaitTicks(0),
       m_inputWaitTicks(0),
-      m_lastDecodeTicks(0), m_lastCopyTicks(0),
+      m_lastDecodeTicks(0), m_lastCopyTicks(0), m_lastBwdifTicks(0),
       m_lastDecodeCpuMs(-1.0),
       m_worstReadTicks(0), m_readCalls(0), m_readBytes(0),
       m_underruns(0), m_textureSet(0),
@@ -378,6 +425,7 @@ void DvdFrameProbe::CloseDecoder()
     for (unsigned i = 0; i < Decoder::PacketCapacity; ++i)
         av_packet_unref(&d.pendingVideo[i]);
     av_packet_free(&d.packet);
+    avfilter_graph_free(&d.videoFilter);
     av_frame_free(&d.decoded);
     avcodec_free_context(&d.codec);
     avformat_close_input(&d.format);
@@ -465,6 +513,9 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
                 d.audioFailed = false;
                 d.subtitleCount = 0;
                 av_packet_free(&d.packet);
+                avfilter_graph_free(&d.videoFilter);
+                d.videoSource = d.videoSink = NULL;
+                d.videoFilterEnded = false;
                 av_frame_free(&d.decoded);
                 avcodec_free_context(&d.codec);
                 avformat_close_input(&d.format);
@@ -630,6 +681,7 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
         m_lastDecodeTicks = frame.decodeTicks;
         m_lastDecodeCpuMs = frame.decodeCpuMs;
         m_lastCopyTicks = frame.copyTicks;
+        m_lastBwdifTicks = frame.bwdifTicks;
         const unsigned luma = frame.width * frame.height;
         const unsigned chroma = ((frame.width + 1) / 2) * ((frame.height + 1) / 2);
         const BYTE* planes[] = {frame.pixels, frame.pixels + luma, frame.pixels + luma + chroma};
@@ -649,6 +701,7 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
                 }
                 d.presentedDvdPts = frame.dvdPts;
                 d.presentedSubtitleTime = frame.subtitleTime;
+                m_deinterlacingActive = frame.deinterlaced;
                 ++m_framesReady;
             }
             else
@@ -656,7 +709,10 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
             if (late > m_maxLate) m_maxLate = late;
             if (late >= frame.duration) ++m_lateByFrame;
             m_untilNext += frame.duration;
-            if (!audioMaster && m_untilNext < 0) m_untilNext = 0;
+            // Keep sub-refresh timing error for field-rate video even when
+            // there is no audio clock, but don't accumulate excess debt.
+            if (!audioMaster && m_untilNext < (frame.filtered ? -frame.duration : 0))
+                m_untilNext = frame.filtered ? -frame.duration : 0;
         }
     }
     d.readIndex = (d.readIndex + 1) % Decoder::QueueCapacity;
@@ -678,6 +734,8 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device)
         return E_OUTOFMEMORY;
     }
     InitializeCriticalSection(&m_decoder->queueStats);
+    m_decoder->disableDeinterlace =
+        GetFileAttributesA("game:\\bwdif-disable.txt") != static_cast<DWORD>(-1);
     m_decoder->stop = CreateEvent(NULL, TRUE, FALSE, NULL);
     const LONG capacity = Decoder::QueueCapacity;
     m_decoder->freeSlots = CreateSemaphore(NULL, capacity, capacity, NULL);
@@ -731,6 +789,7 @@ HRESULT DvdFrameProbe::Advance(IDirect3DDevice9* device, double elapsed, bool au
         {
             avsubtitle_free(&d.heldMenuCue.bitmap);
             d.needsFirstDiscPicture = true;
+            m_deinterlacingActive = false;
             ++m_discSegment;
         }
         m_untilNext = 0;
@@ -813,6 +872,8 @@ double DvdFrameProbe::LastDecodeMilliseconds() const
 { return m_parseFrequency ? m_lastDecodeTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::LastCopyMilliseconds() const
 { return m_parseFrequency ? m_lastCopyTicks * 1000.0 / m_parseFrequency : 0.0; }
+double DvdFrameProbe::LastBwdifMilliseconds() const
+{ return m_parseFrequency ? m_lastBwdifTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::WorstReadMilliseconds() const
 { return m_parseFrequency ? m_worstReadTicks * 1000.0 / m_parseFrequency : 0.0; }
 double DvdFrameProbe::UploadMilliseconds() const
@@ -985,6 +1046,8 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         }
     }
 
+    const AVRational inputTimeBase = d.format->streams[d.video]->time_base;
+    LONGLONG bwdifTicks = 0;
     for (;;)
     {
         if (WaitForSingleObject(d.stop, 0) == WAIT_OBJECT_0)
@@ -992,6 +1055,18 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         if (WaitForSingleObject(d.seekRequest, 0) == WAIT_OBJECT_0 &&
             FfmpegDiscUserJumpPending(d.io))
             return S_FALSE;
+        if (d.videoFilter)
+        {
+            LARGE_INTEGER filterStart, filterEnd;
+            QueryPerformanceCounter(&filterStart);
+            const int filtered = av_buffersink_get_frame(d.videoSink, d.decoded);
+            QueryPerformanceCounter(&filterEnd);
+            bwdifTicks += filterEnd.QuadPart - filterStart.QuadPart;
+            if (filtered == 0) break;
+            if (filtered == AVERROR_EOF) return S_FALSE;
+            if (filtered != AVERROR(EAGAIN) || d.videoFilterEnded)
+                return VideoPipelineError("bwdif output", filtered);
+        }
         LARGE_INTEGER start, end;
         QueryPerformanceCounter(&start);
         const int status = avcodec_receive_frame(d.codec, d.decoded);
@@ -1006,15 +1081,47 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
                 d.DrainDeferredAudio(true);
                 d.DecodeAudioPacket(NULL);
             }
-            return S_FALSE;
+            if (!d.videoFilter) return S_FALSE;
+            const int drain = av_buffersrc_add_frame(d.videoSource, NULL);
+            if (drain < 0) return VideoPipelineError("bwdif drain", drain);
+            d.videoFilterEnded = true;
+            continue;
         }
         if (status == 0)
         {
             d.deferStartupAudio = false;
-            break;
+            AVFrame& picture = *d.decoded;
+            if (picture.format != AV_PIX_FMT_YUV420P ||
+                picture.width <= 0 || picture.width > int(kWidth) ||
+                picture.height <= 0 || picture.height > int(kHeight))
+                return E_INVALIDARG;
+            // Pure progressive streams avoid filter allocation and lookahead.
+            if (!d.videoFilter &&
+                (d.disableDeinterlace || !(picture.flags & AV_FRAME_FLAG_INTERLACED)))
+                break;
+            if (!d.videoFilter)
+            {
+                const int opened = d.OpenVideoFilter(picture, inputTimeBase);
+                if (opened < 0) return VideoPipelineError("bwdif setup", opened);
+            }
+            picture.pts = picture.best_effort_timestamp;
+            // bwdif copies opaque to its output and clears the interlaced
+            // flag only when it actually reconstructs the picture.
+            picture.opaque = (picture.flags & AV_FRAME_FLAG_INTERLACED) ? &d : NULL;
+            if (picture.duration <= 0)
+                picture.duration = static_cast<int64_t>(
+                    (1.0 + picture.repeat_pict * 0.5) /
+                    ((d.frameRate > 0 ? d.frameRate : 25.0) * av_q2d(inputTimeBase)) + 0.5);
+            LARGE_INTEGER pushStart, pushEnd;
+            QueryPerformanceCounter(&pushStart);
+            const int pushed = av_buffersrc_add_frame(d.videoSource, &picture);
+            QueryPerformanceCounter(&pushEnd);
+            bwdifTicks += pushEnd.QuadPart - pushStart.QuadPart;
+            if (pushed < 0) return VideoPipelineError("bwdif input", pushed);
+            continue;
         }
         if (status != AVERROR(EAGAIN) || d.flushed)
-            return E_FAIL;
+            return VideoPipelineError("decoder receive", status);
 
         if (d.packetCount)
         {
@@ -1037,27 +1144,31 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
             d.flushed = true;
             const int flush = avcodec_send_packet(d.codec, NULL);
             if (flush < 0)
-                return flush == AVERROR_EOF ? S_FALSE : E_FAIL;
+                if (flush != AVERROR_EOF) return E_FAIL;
         }
         else
             return E_FAIL;
     }
 
     const AVFrame& decoded = *d.decoded;
+    frame.bwdifTicks = bwdifTicks;
     if (decoded.format != AV_PIX_FMT_YUV420P ||
         decoded.width <= 0 || decoded.width > int(kWidth) ||
         decoded.height <= 0 || decoded.height > int(kHeight))
         return E_INVALIDARG;
     frame.width = decoded.width;
     frame.height = decoded.height;
-    AVStream* video = d.format->streams[d.video];
-    frame.dvdPts = decoded.best_effort_timestamp == AV_NOPTS_VALUE ? -1 :
-        av_rescale_q(decoded.best_effort_timestamp, video->time_base, av_make_q(1, 90000));
+    frame.filtered = d.videoFilter != NULL;
+    frame.deinterlaced = frame.filtered && !(decoded.flags & AV_FRAME_FLAG_INTERLACED);
+    const AVRational timeBase = d.videoFilter ? av_buffersink_get_time_base(d.videoSink) : inputTimeBase;
+    const int64_t pts = d.videoFilter ? decoded.pts : decoded.best_effort_timestamp;
+    frame.dvdPts = pts == AV_NOPTS_VALUE ? -1 :
+        av_rescale_q(pts, timeBase, av_make_q(1, 90000));
     frame.subtitleTime = frame.dvdPts < 0 ? -1.0 : frame.dvdPts / 90000.0 -
         (d.format->start_time == AV_NOPTS_VALUE ? 0 : d.format->start_time / double(AV_TIME_BASE));
     const double rate = d.frameRate;
     frame.duration = decoded.duration > 0
-        ? decoded.duration * av_q2d(video->time_base)
+        ? decoded.duration * av_q2d(timeBase)
         : (1.0 + decoded.repeat_pict * 0.5) / (rate > 0 ? rate : 25.0);
 
     LARGE_INTEGER start, end;

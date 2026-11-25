@@ -12,6 +12,15 @@ if [[ ${1:-} == --xbox-altivec ]]; then
     altivec=1
     simd=(--enable-asm --enable-altivec --disable-vsx --disable-power8 --disable-runtime-cpudetect)
 fi
+bwdif_vmx=0
+if [[ ${1:-} == --experimental-bwdif-vmx ]]; then
+    if (( ! altivec )); then
+        echo '--experimental-bwdif-vmx requires --xbox-altivec' >&2
+        exit 1
+    fi
+    shift
+    bwdif_vmx=1
+fi
 mkdir -p "$build"
 cd "$build"
 
@@ -22,6 +31,14 @@ src="$build/source-$revision"
 mkdir -p "$src"
 git -C "$root/deps/ffmpeg" archive "$revision" |
     python3 -c 'import sys, tarfile; tarfile.open(fileobj=sys.stdin.buffer, mode="r|").extractall(sys.argv[1], filter="data")' "$src"
+
+# Force a rebuild even when git archive restored an older source timestamp.
+if (( bwdif_vmx )); then
+    cp "$root/port/xbox360/ffmpeg-bwdif-vmx.h" "$src/libavfilter/rxdk-bwdif-vmx.h"
+    sed -i '/^av_cold void ff_bwdif_init_filter_line/i #include "rxdk-bwdif-vmx.h"' "$src/libavfilter/bwdifdsp.c"
+    sed -i '/s->filter_line  = ff_bwdif_filter_line_c;/s/ff_bwdif_filter_line_c/dvd360_bwdif_line/' "$src/libavfilter/bwdifdsp.c"
+fi
+touch "$src/libavfilter/bwdifdsp.c"
 
 sdk=$(wslpath -u "${RXDK360:-C:\\Program Files\\RXDK-360}")
 printf 'sdk=%q\naltivec=%d\n' "$sdk" "$altivec" > rxdk-env
@@ -63,7 +80,7 @@ for arg in "$@"; do
         */libavcodec/ppc/idctdsp.c)
             if (( altivec )); then args+=(-include rxdk-vmx-idct.h); fi
             ;;
-        */libavcodec/ppc/me_cmp.c)
+         */libavcodec/ppc/me_cmp.c)
             # These kernels require standard VMX opcodes missing on Xenon.
             if (( altivec )); then args+=(-include rxdk-scalar-dsp.h); fi
             ;;
@@ -141,7 +158,8 @@ exec "$src/configure" \
     --cxx=./rxdk-cc --ld=./rxdk-ld --ar=./rxdk-ar --ranlib=true --nm=nm --host-cc=gcc \
     --disable-everything --disable-autodetect --disable-programs --disable-doc \
     --disable-network --disable-asm --disable-inline-asm "${simd[@]}" \
-    --disable-pthreads --disable-avdevice --disable-avfilter \
+    --disable-pthreads --disable-avdevice --enable-avfilter \
+    --enable-filter=bwdif \
     --enable-swresample --disable-swscale \
     --enable-decoder=mpeg2video,ac3,mp2,pcm_dvd,dca,dvdsub \
     --enable-parser=mpegvideo,ac3,mpegaudio,dca,dvdsub \

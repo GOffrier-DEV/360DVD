@@ -19,7 +19,7 @@ namespace
 {
     void BootLog(const char* message, HRESULT result = S_OK)
     {
-#ifdef DVD360_LOGGING
+#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
         char line[320];
         sprintf_s(line, sizeof(line), "%s (status=0x%08X)\r\n",
                   message, (unsigned int)result);
@@ -49,7 +49,7 @@ namespace
 
         void Open()
         {
-#ifdef DVD360_LOGGING
+#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
             InitializeCriticalSection(&lock);
             wake = CreateEvent(NULL, FALSE, FALSE, NULL);
             if (wake)
@@ -325,6 +325,7 @@ namespace
         unsigned queueBefore, queueAfter, audioBuffers, videoDropped, audioRecovery;
         float interval, advance, draw, present;
         double decode, copy, audio, audioAtPresent;
+        double bwdif;
         bool audioMaster;
         double parse, read, upload, gpuWait;
         double demux, audioWork;
@@ -350,7 +351,7 @@ namespace
 
     void WritePacingTrace(unsigned count, unsigned omitted)
     {
-#ifdef DVD360_LOGGING
+#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
         HANDLE file = CreateFileA("game:\\360DVD-pacing.csv",
                                   GENERIC_WRITE, FILE_SHARE_READ,
                                   NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -364,7 +365,7 @@ namespace
                       "draw_ms,present_ms,video_codec_ms,readfile_ms,upload_ms,gpu_wait_ms,"
                       "advance_status,present_status,drew_video,queue_before,queue_after,"
                         "decode_frame_ms,frame_copy_ms,audio_ms,audio_master,audio_present_ms,"
-                         "demux_ms_including_readfile,decode_cpu_ms,audio_buffers,video_expired,audio_recovery_ticks,audio_work_ms\n";
+                          "demux_ms_including_readfile,decode_cpu_ms,audio_buffers,video_expired,audio_recovery_ticks,audio_work_ms,bwdif_ms\n";
         bool ok = WriteTraceBytes(file, header, sizeof(header) - 1);
         DWORD used = 0;
         double priorParse = 0, priorRead = 0, priorUpload = 0, priorWait = 0;
@@ -375,7 +376,7 @@ namespace
             char row[512];
             const int length = sprintf_s(row, sizeof(row), "%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,"
                           "%.3f,%.3f,%.3f,%.3f,%08X,%08X,%u,%u,%u,%.3f,%.3f,%.3f,%u,%.3f,"
-                           "%.3f,%.3f,%u,%u,%u,%.3f\n",
+                           "%.3f,%.3f,%u,%u,%u,%.3f,%.3f\n",
                     i + 1, s.frame, s.presented, s.missed, s.underruns,
                     s.interval, s.advance, s.draw, s.present,
                     s.parse - priorParse, s.read - priorRead,
@@ -384,7 +385,7 @@ namespace
                      s.queueBefore, s.queueAfter, s.decode, s.copy, s.audio,
                        (unsigned)s.audioMaster, s.audioAtPresent, s.demux - priorDemux,
                        s.decodeCpu, s.audioBuffers, s.videoDropped, s.audioRecovery,
-                       s.audioWork - priorAudioWork);
+                        s.audioWork - priorAudioWork, s.bwdif);
             priorDemux = s.demux;
             priorAudioWork = s.audioWork;
             if (length <= 0)
@@ -537,6 +538,7 @@ namespace
         double playbackSeconds = 0;
         double playbackDuration = frame.DurationSeconds();
         unsigned discSegment = frame.DiscSegment();
+        bool deinterlaceNotified = false;
         LARGE_INTEGER frequency;
         LARGE_INTEGER previous;
         QueryPerformanceFrequency(&frequency);
@@ -658,6 +660,7 @@ namespace
                 if (discSegment != frame.DiscSegment())
                 {
                     discSegment = frame.DiscSegment();
+                    deinterlaceNotified = false;
                     playbackSeconds = 0;
                     playbackDuration = frame.DurationSeconds();
                     subtitleCount = frame.SubtitleCount();
@@ -685,6 +688,13 @@ namespace
                     playbackEnded = true;
                     showFrame = false;
                 }
+            }
+            if (osdReady && showFrame && capture && !playbackEnded &&
+                !deinterlaceNotified && frame.DeinterlacingActive())
+            {
+                osd.ShowDeinterlacePopup();
+                BootLog("Interlaced video detected; FFmpeg bwdif active");
+                deinterlaceNotified = true;
             }
             LARGE_INTEGER advanceEnd;
             QueryPerformanceCounter(&advanceEnd);
@@ -756,7 +766,7 @@ namespace
                 lastPresented = frame.FramesReady();
                 ++presentedFrames;
             }
-#ifdef DVD360_LOGGING
+#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
             if (capture && !paused)
             {
                 if (traceCount < sizeof(pacingTrace) / sizeof(pacingTrace[0]))
@@ -772,6 +782,7 @@ namespace
                     s.decode = newFrame ? frame.LastDecodeMilliseconds() : 0.0;
                     s.decodeCpu = newFrame ? frame.LastDecodeCpuMilliseconds() : 0.0;
                     s.copy = newFrame ? frame.LastCopyMilliseconds() : 0.0;
+                    s.bwdif = newFrame ? frame.LastBwdifMilliseconds() : 0.0;
                      s.audio = embeddedMs;
                      s.audioMaster = embeddedAudio;
                      s.audioBuffers = audioBuffers;

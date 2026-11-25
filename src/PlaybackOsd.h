@@ -24,12 +24,14 @@ public:
     Action Update(double elapsed, bool paused, bool discButtons = false, bool discStill = false);
     void DrawMenuFocus(IDirect3DDevice9* device, float x, float y, float width, float height);
     void ShowTrackPopup(bool subtitle, unsigned track, const char* language);
+    void ShowDeinterlacePopup();
     bool Ready() const { return m_decl != NULL; }
     void DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                     unsigned width, unsigned height, const BYTE* pixels, int pitch,
                     const BYTE* palette, unsigned colors);
 
 private:
+    void StartPopup();
     struct Vertex { float x, y, z, w; DWORD color; };
     void Rect(float x, float y, float w, float h, DWORD color);
     void Submit(IDirect3DDevice9* device);

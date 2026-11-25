@@ -1,5 +1,6 @@
 param(
     [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
+    [switch]$VideoPerfLogging,
     [string]$RxdkRoot = 'C:\Program Files\RXDK-360',
     [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
 )
@@ -20,13 +21,14 @@ $project = Join-Path $PSScriptRoot '360DVD.vcxproj'
 $deviceSource = Join-Path $PSScriptRoot 'build\obj\libs\device_xbox360.c'
 $dvdDebug = if ($Configuration -eq 'Debug') { 'true' } else { 'false' }
 $ffmpegBuild = Join-Path $PSScriptRoot 'build\ffmpeg-rxdk-altivec'
-foreach ($lib in 'avformat', 'avcodec', 'swresample', 'avutil') {
+foreach ($lib in 'avformat', 'avcodec', 'avfilter', 'swresample', 'avutil') {
     if (-not (Test-Path "$ffmpegBuild\lib$lib\lib$lib.a")) {
         throw 'Build FFmpeg from WSL first; see docs/ffmpeg-rxdk.md.'
     }
 }
 $ffmpegProperties = @("/p:FfmpegBuildDir=$ffmpegBuild",
     "/p:FfmpegSourceDir=$(Join-Path $PSScriptRoot 'deps\ffmpeg')")
+$videoPerfProperty = if ($VideoPerfLogging) { '/p:VideoPerfLogging=true' } else { '/p:VideoPerfLogging=false' }
 
 foreach ($tool in @($MSBuild, $clang, $ar)) {
     if (-not (Test-Path $tool)) { throw "Required build tool not found: $tool" }
@@ -109,6 +111,7 @@ $resourceDir = Join-Path $PSScriptRoot "build\embedded\$Configuration"
     "/p:RxdkLibcDir=$runtime" "/p:RxdkHelperLib=$helperLib" `
     "/p:DvdLibraries=$dvdLibrary" `
     "/p:EmbeddedResourceDir=$resourceDir" `
+    $videoPerfProperty `
     @ffmpegProperties `
     "/p:OutDir=$output\" "/p:IntDir=$(Join-Path $PSScriptRoot "build\obj\$Configuration")\"
 if ($LASTEXITCODE -ne 0) {

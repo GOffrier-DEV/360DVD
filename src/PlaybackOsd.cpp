@@ -378,6 +378,17 @@ void PlaybackOsd::ShowTrackPopup(bool subtitle, unsigned track, const char* lang
     else
         sprintf_s(m_trackPopup, sizeof(m_trackPopup), "Audio: %s",
                   language ? language : "Unavailable");
+    StartPopup();
+}
+
+void PlaybackOsd::ShowDeinterlacePopup()
+{
+    strcpy_s(m_trackPopup, sizeof(m_trackPopup), "Deinterlacing active (bwdif)");
+    StartPopup();
+}
+
+void PlaybackOsd::StartPopup()
+{
     m_trackPopupTime = 2.5;
     HXUIOBJ label;
     if (m_stockPopup && SUCCEEDED(XuiElementGetChildById(m_stockPopup, L"txt_Action", &label)))

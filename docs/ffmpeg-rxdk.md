@@ -50,6 +50,9 @@ in this build. No files in the FFmpeg source tree are patched.
 
 Interlaced video uses FFmpeg `bwdif` with automatic field order and field-rate
 output (normally 50 or 59.94 pictures per second, subject to display refresh).
+The Xbox AltiVec build uses the packed Xenon VMX kernel by default. To
+benchmark against upstream scalar `bwdif`, pass `--scalar-bwdif` after
+`--xbox-altivec` when configuring FFmpeg, then rebuild FFmpeg and the player.
 Progressive video is not deinterlaced. Once the filter is active, it buffers
 one input picture for lookahead; DVD navigation resets that history.
 

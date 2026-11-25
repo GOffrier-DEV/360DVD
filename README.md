@@ -1,4 +1,4 @@
-# 360DVD 1.1
+# 360DVD 1.2
 
 DVD player for modded Xbox 360 consoles (RGH/JTAG).
 

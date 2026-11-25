@@ -3,6 +3,12 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-25
+
+- Added field-rate FFmpeg `bwdif` deinterlacing with automatic field order
+  and a playback notification. Progressive video is not deinterlaced.
+- Enabled the packed Xenon VMX kernel by default for Xbox builds.
+
 ## [1.1.0] - 2026-11-25
 
 ### Added
@@ -68,3 +74,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 
 [1.0.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.0.0
 [1.1.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.1.0
+[1.2.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.2.0

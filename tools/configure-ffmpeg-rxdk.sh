@@ -12,14 +12,16 @@ if [[ ${1:-} == --xbox-altivec ]]; then
     altivec=1
     simd=(--enable-asm --enable-altivec --disable-vsx --disable-power8 --disable-runtime-cpudetect)
 fi
-bwdif_vmx=0
+bwdif_vmx=$altivec
 if [[ ${1:-} == --experimental-bwdif-vmx ]]; then
     if (( ! altivec )); then
         echo '--experimental-bwdif-vmx requires --xbox-altivec' >&2
         exit 1
     fi
     shift
-    bwdif_vmx=1
+elif [[ ${1:-} == --scalar-bwdif ]]; then
+    shift
+    bwdif_vmx=0
 fi
 mkdir -p "$build"
 cd "$build"

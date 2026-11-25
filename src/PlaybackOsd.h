@@ -50,8 +50,8 @@ private:
     double m_visible;
     HXUIDC m_stockDc;
     HXUIOBJ m_stockScenes[2], m_stockPopup;
-    HXUIOBJ m_cdScene = NULL;
     unsigned m_cdSelected = 1;
+    HXUIOBJ m_cdScene = NULL;
     int m_cdFocused = -1;
     int m_cdPaused = -1;
     DWORD ReadPressedButtons();

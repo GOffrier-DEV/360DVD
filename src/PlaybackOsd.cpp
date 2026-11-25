@@ -38,7 +38,7 @@ namespace
         const wchar_t* name = locator;
         for (const wchar_t* p = locator; *p; ++p)
             if (*p == L'/' || *p == L'\\') name = p + 1;
-        if (wcsncmp(name, L"ico_32x_", 8) != 0)
+        if (wcsncmp(name, L"ico_32x_", 8) != 0 && wcsncmp(name, L"wmp11-", 6) != 0)
             return XuiPNGTextureLoader(device, locator, info, texture);
         UINT size;
         const BYTE* png = FindDvdResource(name, size);
@@ -139,7 +139,6 @@ void PlaybackOsd::CloseStock()
     if (m_cdScene) XuiDestroyObject(m_cdScene);
     m_cdScene = NULL;
     ResetCdFocus();
-    m_cdPaused = -1;
     if (m_stockPopup) XuiDestroyObject(m_stockPopup);
     m_stockPopup = NULL;
     for (unsigned i = 0; i < 2; ++i)
@@ -282,24 +281,32 @@ void PlaybackOsd::ResetCdFocus()
 {
     m_cdSelected = 1;
     m_cdFocused = -1;
+    m_cdPaused = -1;
 }
 
 void PlaybackOsd::DrawCd(bool paused, double elapsed)
 {
     if (!m_cdScene) return;
-    const wchar_t* ids[] = {L"btn_Last", L"btn_Play", L"btn_Next"};
-    HXUIOBJ button;
-    if (m_cdFocused != int(m_cdSelected) &&
-        SUCCEEDED(XuiElementGetChildById(m_cdScene, ids[m_cdSelected], &button)))
+    if (m_cdFocused != int(m_cdSelected))
     {
-        XuiElementSetFocus(button);
+        const wchar_t* ids[] = {L"focus_Previous", L"focus_Play", L"focus_Next"};
+        for (unsigned i = 0; i < ARRAYSIZE(ids); ++i)
+        {
+            HXUIOBJ ring;
+            if (SUCCEEDED(XuiElementGetChildById(m_cdScene, ids[i], &ring)))
+                XuiElementSetOpacity(ring, i == m_cdSelected ? 1.0f : 0.0f);
+        }
         m_cdFocused = int(m_cdSelected);
     }
-    if (m_cdPaused != int(paused) &&
-        SUCCEEDED(XuiElementGetChildById(m_cdScene, ids[1], &button)) &&
-        SUCCEEDED(XuiControlSetImagePath(button, paused ? L"dvd360:///ico_32x_play_black.png" :
-                                                        L"dvd360:///ico_32x_pause_black.png")))
+    if (m_cdPaused != int(paused))
+    {
+        HXUIOBJ icon;
+        if (SUCCEEDED(XuiElementGetChildById(m_cdScene, L"ico_Play", &icon)))
+            XuiElementSetOpacity(icon, paused ? 1.0f : 0.0f);
+        if (SUCCEEDED(XuiElementGetChildById(m_cdScene, L"ico_Pause", &icon)))
+            XuiElementSetOpacity(icon, paused ? 0.0f : 1.0f);
         m_cdPaused = int(paused);
+    }
     XuiAnimRun(static_cast<float>(elapsed * 1000));
     XuiTimersRun();
     if (SUCCEEDED(XuiRenderBegin(m_stockDc, 0)))

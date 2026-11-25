@@ -3,6 +3,11 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-11-25
+
+- Restyled the CD transport as a WMP11-inspired XUI scene with Xbox-green
+  focus, gray track controls, and a centered Play/Pause glyph.
+
 ## [1.4.0] - 2026-11-25
 
 - Added audio CD playback from the optical drive through XAudio2. Data
@@ -97,3 +102,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.3.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.0
 [1.3.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.1
 [1.4.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.0
+[1.4.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.1

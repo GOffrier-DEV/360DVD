@@ -27,6 +27,11 @@ sdk=$(wslpath -u "${RXDK360:-C:\\Program Files\\RXDK-360}")
 printf 'sdk=%q\naltivec=%d\n' "$sdk" "$altivec" > rxdk-env
 if (( altivec )); then
     cp "$root/port/xbox360/ffmpeg-vmx-idct.h" rxdk-vmx-idct.h
+    cp "$root/port/xbox360/ffmpeg-slice-atomics.h" rxdk-slice-atomics.h
+    cp "$root/port/xbox360/ffmpeg-native-threads.h" "$src/compat/w32pthreads.h"
+    # Our native adapter supplies the synchronization APIs missing from RXDK.
+    sed -i '/check_func_headers "windows.h process.h" _beginthreadex &&/c\    true \&\&' "$src/configure"
+    sed -i '/check_type "windows.h" \(CONDITION_VARIABLE\|INIT_ONCE\) &&/d' "$src/configure"
 fi
 cat > rxdk-scalar-dsp.h <<'EOF'
 #include "config.h"
@@ -64,6 +69,9 @@ for arg in "$@"; do
             ;;
         */libavutil/error.c)
             args+=(-include rxdk-error-config.h)
+            ;;
+        */libavutil/slicethread.c)
+            if (( altivec )); then args+=(-include rxdk-slice-atomics.h); fi
             ;;
         */libavcodec/mpeg12dec.c|*/libavcodec/mpegvideo_dec.c|*/libavcodec/mpegvideo_motion.c|*/libavcodec/simple_idct.c)
             args+=(-O3)

@@ -1,4 +1,5 @@
 #include "FfmpegFileIo.h"
+#include "PlaybackAffinity.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -31,6 +32,8 @@ namespace
 
     DWORD WINAPI ReadWorker(void* opaque)
     {
+        if (PlaybackAffinity::Enabled())
+            PlaybackAffinity::Pin(PlaybackAffinity::Reader);
         FileInput& input = *static_cast<FileInput*>(opaque);
         int64_t physical = -1;
         for (;;)

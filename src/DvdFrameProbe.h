@@ -27,6 +27,7 @@ public:
     double ParseMilliseconds() const;
     unsigned Underruns() const { return m_underruns; }
     const char* DecodeMode() const { return m_decodeMode; }
+    unsigned ActiveSliceThreads() const;
     unsigned MotionBlocks() const { return m_motionBlocks; }
     unsigned DcBlocks() const { return m_dcBlocks; }
     unsigned IdctBlocks() const { return m_idctBlocks; }

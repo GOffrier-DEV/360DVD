@@ -6,6 +6,7 @@
 
 #include "DvdLogoBounce.h"
 #include "DvdFrameProbe.h"
+#include "PlaybackAffinity.h"
 #include "XboxDvdStream.h"
 #include <dvdread/dvd_udf.h>
 #include <limits.h>
@@ -453,6 +454,11 @@ namespace
     int Run()
     {
         BootLog("360DVD boot");
+        if (PlaybackAffinity::Enabled())
+        {
+            PlaybackAffinity::Pin(PlaybackAffinity::Renderer);
+            BootLog("Playback affinity: render=5 decode=2 reader=0");
+        }
         XVIDEO_MODE videoMode;
         XGetVideoMode(&videoMode);
 
@@ -546,8 +552,8 @@ namespace
                 frame.StartupVideoBuffer(queued, target, budget);
                 char startup[128];
                 sprintf_s(startup, sizeof(startup),
-                          "Startup video bytes: queued=%u target=%u budget=%u",
-                          queued, target, budget);
+                          "Startup video bytes: queued=%u target=%u budget=%u slice_threads=%u",
+                          queued, target, budget, frame.ActiveSliceThreads());
                 BootLog(startup);
             BootLog(compressed ? (showFrame ? "CPU MPEG-2 frame ready" : "CPU MPEG-2 probe failed")
                                : (showFrame ? "YUV test frame ready" : "YUV test frame failed"),

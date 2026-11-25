@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "DvdFrameProbe.h"
+#include "PlaybackAffinity.h"
 
 #include "FfmpegFileIo.h"
 #include "FfmpegAudio.h"
@@ -213,12 +214,16 @@ void DvdFrameProbe::CloseDecoder()
 DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
 {
     DvdFrameProbe& player = *static_cast<DvdFrameProbe*>(context);
+    if (PlaybackAffinity::Enabled())
+        PlaybackAffinity::Pin(PlaybackAffinity::Decoder);
     Decoder& d = *player.m_decoder;
     HANDLE wait[] = {d.stop, d.freeSlots};
     unsigned initialFrames = 0;
     bool primed = false;
     bool refillAudio = false;
+    bool urgentAudio = false;
     const unsigned audioLow = 8, audioTarget = 16, videoPacketTarget = 12;
+    const unsigned audioCritical = 3, audioResumeVideo = 6;
     for (;;)
     {
         const bool haveAudio = d.audio && !d.audioFailed;
@@ -234,16 +239,20 @@ DWORD WINAPI DvdFrameProbe::DecodeWorker(void* context)
             SetEvent(d.primed);
             primed = true;
         }
-        // Refill in bursts; don't spend a render deadline reading ahead when
-        // the decoder has fewer than three ready frames to cover the work.
+        // Normally keep decoded video ahead. If audio is at risk of
+        // starving, demux for it even with a shallow decoded-video queue.
+        // The renderer drops expired frames against the audio clock.
         refillAudio = haveAudio && audioBuffers < (refillAudio ? audioTarget : audioLow);
+        urgentAudio = primed && haveAudio &&
+            audioBuffers < (urgentAudio ? audioResumeVideo : audioCritical);
         const bool needAudio = haveAudio && (refillAudio || !primed);
         const bool wantPackets = d.packetCount < videoPacketTarget &&
             (!haveAudio || audioBuffers < audioTarget);
         const bool readAhead = canReadAhead &&
             (needAudio || wantPackets || (!primed && !videoReady));
         const unsigned depth = player.QueueDepth();
-        if (readAhead && primed && refillAudio && depth >= Decoder::QueueCapacity / 2)
+        if (readAhead && primed &&
+            (urgentAudio || (refillAudio && depth >= Decoder::QueueCapacity / 2)))
         {
             if (WaitForSingleObject(d.stop, 0) != WAIT_TIMEOUT)
                 break;
@@ -525,6 +534,15 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
         d.codec->pkt_timebase = video->time_base;
         d.codec->thread_count = 1;
 #ifdef DVD360_FFMPEG_ALTIVEC
+        FILE* singleThread = fopen("game:\\ffmpeg-single-thread.enable", "rb");
+        if (singleThread)
+            fclose(singleThread);
+        else
+        {
+            PlaybackAffinity::Pin(PlaybackAffinity::Decoder);
+            d.codec->thread_count = 2;
+            d.codec->thread_type = FF_THREAD_SLICE;
+        }
         d.codec->idct_algo = FF_IDCT_ALTIVEC;
         m_decodeMode = "FFmpeg MPEG-2 (AltiVec and Xenon IDCT)";
         FILE* scalarIdct = fopen("game:\\ffmpeg-scalar-idct.enable", "rb");
@@ -651,6 +669,12 @@ unsigned DvdFrameProbe::AudioRecoveryTicks() const
 double DvdFrameProbe::AudioWorkMilliseconds() const
 {
     return m_parseFrequency ? m_audioWorkTicks * 1000.0 / m_parseFrequency : 0.0;
+}
+
+unsigned DvdFrameProbe::ActiveSliceThreads() const
+{
+    const AVCodecContext* codec = m_decoder ? m_decoder->codec : NULL;
+    return codec && (codec->active_thread_type & FF_THREAD_SLICE) ? codec->thread_count : 0;
 }
 
 void DvdFrameProbe::StartupVideoBuffer(unsigned& queued, unsigned& target, unsigned& budget) const

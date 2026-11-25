@@ -73,6 +73,20 @@ with the scalar build using the same VOB.
 
 ## Playback acceptance
 
+For an affinity A/B test, run the same XEX and VOB with and without an
+empty `playback-affinity.enable` beside the XEX. The marker requests
+hardware threads 5 (render), 2 (decode), and 0 (reader), with unchanged
+thread priorities and audio refill policy. This does not enable FFmpeg
+slice threading.
+
+The AltiVec build defaults to two-way MPEG-2 slice decoding using
+FFmpeg's native RXDK thread adapter. The calling decoder runs on logical
+processor 2 and the helper runs on 4. Verify `slice_threads=2` in the
+startup log. Place an empty `ffmpeg-single-thread.enable` beside the XEX
+for a single-thread comparison.
+Use the same affinity marker setting in both runs. Audio remains
+single-threaded and its refill policy is unchanged.
+
 - Build normally with `.\build.ps1`; libmpeg2 is no longer built or linked.
   Place an unencrypted `dvd-video.vob` next to the XEX for FFmpeg video
   playback. If absent, the title tries `mpeg2-probe.m2v` with optional
@@ -85,7 +99,9 @@ with the scalar build using the same VOB.
   container bitrate, then 6 Mb/s if neither is reported). It stops early
   at EOF, a read-ahead limit, or 24 queued audio buffers. The boot log
   reports the queued, target, and budget bytes. During playback, the worker starts refilling audio below eight
-  buffers when at least three decoded frames are ready. With a full
+  buffers when at least three decoded frames are ready. Below three audio
+  buffers, it prioritizes audio regardless of decoded-video depth until
+  six audio buffers are queued or the read-ahead limit is reached. With a full
   decoded queue, it can also read ahead toward 12 compressed video
   packets. Read-ahead is limited to 96 packets and stops once queued
   video payload reaches the lesser of 4 MiB and 1/32 of the available

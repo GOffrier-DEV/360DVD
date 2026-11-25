@@ -16,10 +16,23 @@ namespace
     const char kPs[] =
         "sampler2D image:register(s0);"
         "float4 main(float2 uv:TEXCOORD0):COLOR0{return tex2D(image,uv);}";
+    const char kBlurPs[] =
+        "sampler2D image:register(s0);"
+        "float4 rotation:register(c0);"
+        "float2 turn(float2 p,float s,float c){"
+        "return float2(c*p.x-s*p.y,s*p.x+c*p.y)+0.5;}"
+        "float4 main(float2 uv:TEXCOORD0):COLOR0{"
+        "float2 p=uv-0.5;"
+        "return (tex2D(image,turn(p,-rotation.z,rotation.w))"
+        "+2*tex2D(image,turn(p,-rotation.x,rotation.y))"
+        "+3*tex2D(image,uv)"
+        "+2*tex2D(image,turn(p,rotation.x,rotation.y))"
+        "+tex2D(image,turn(p,rotation.z,rotation.w)))/9;}";
 }
 
 CdDiscScene::~CdDiscScene()
 {
+    if (blurPs) blurPs->Release();
     if (ps) ps->Release();
     if (vs) vs->Release();
     if (declaration) declaration->Release();
@@ -87,6 +100,12 @@ HRESULT CdDiscScene::Open(IDirect3DDevice9* device)
                             &code, NULL, NULL);
     if (FAILED(hr)) return hr;
     hr = device->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &ps);
+    code->Release();
+    if (FAILED(hr)) return hr;
+    hr = D3DXCompileShader(kBlurPs, sizeof(kBlurPs) - 1, NULL, NULL, "main", "ps_3_0", 0,
+                           &code, NULL, NULL);
+    if (FAILED(hr)) return hr;
+    hr = device->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &blurPs);
     code->Release();
     return hr;
 }
@@ -176,6 +195,16 @@ bool CdDiscScene::Draw(IDirect3DDevice9* device, bool spinning, double elapsed)
         {centerX - halfWidth,-.55f, .5f, 0, 1}, {centerX + halfWidth,-.55f, .5f, 1, 1}
     };
     device->SetTexture(0, resolved);
+    if (speed > 0.f)
+    {
+        // Simulate a 1/120-second exposure around the current disc angle.
+        // Sampling the resolved texture keeps the blur out of the XUI pass.
+        const float stepAngle = speed / 480.f;
+        const float rotation[] = {sinf(stepAngle), cosf(stepAngle),
+                                  sinf(2.f * stepAngle), cosf(2.f * stepAngle)};
+        device->SetPixelShaderConstantF(0, rotation, 1);
+        device->SetPixelShader(blurPs);
+    }
     device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
     device->SetTexture(0, NULL);
     device->SetRenderState(D3DRS_ZENABLE, z);

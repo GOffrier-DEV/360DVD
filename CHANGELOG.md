@@ -3,6 +3,12 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-11-25
+
+- Fixed the XAM patch offset so eject keeps 360DVD open for both CDs and
+  DVDs on the supported devkit build.
+- Added rotational motion blur to the spinning CD visualization.
+
 ## [1.5.0] - 2026-11-25
 
 - Replaced the DVD screensaver during audio CD playback with a textured 3D
@@ -111,3 +117,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.4.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.0
 [1.4.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.1
 [1.5.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.0
+[1.5.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.1

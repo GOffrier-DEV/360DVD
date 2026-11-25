@@ -68,7 +68,8 @@ namespace
 
     bool InstallEjectTitleExitPatch()
     {
-        static const DWORD kXamEjectLaunchOffset = 0x1DCDCu;
+        // Verified live call site minus the loaded XAM image base.
+        static const DWORD kXamEjectLaunchOffset = 0x8176DCDCu - 0x815F0000u;
         static const DWORD kExpectedCall = 0x4BFF11F5u;
         static const DWORD kPowerPcNop = 0x60000000u;
         static const DWORD kDmSetMemoryOrdinal = 40;

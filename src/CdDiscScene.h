@@ -23,4 +23,5 @@ private:
     IDirect3DVertexDeclaration9* declaration = NULL;
     IDirect3DVertexShader9* vs = NULL;
     IDirect3DPixelShader9* ps = NULL;
+    IDirect3DPixelShader9* blurPs = NULL;
 };

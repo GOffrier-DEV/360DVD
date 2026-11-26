@@ -3,6 +3,13 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.3] - 2026-11-25
+
+- Added a guarded direct-write fallback for the verified 17559 XAM eject
+  handler when its stripped XBDM does not export `DmSetMemory`. The patch
+  validates the complete instruction signature, updates only the dashboard
+  launch call, flushes the PPC instruction cache, and verifies the result.
+
 ## [1.5.2] - 2026-11-25
 
 - Improved CD audio startup and recovery after switching from DVD playback.
@@ -127,3 +134,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.5.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.0
 [1.5.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.1
 [1.5.2]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.2
+[1.5.3]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.5.3

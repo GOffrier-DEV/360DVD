@@ -55,7 +55,7 @@ namespace
     //
     // This is deliberately build-locked.  Never write a guessed address:
     // XAM's image base comes from its loaded-module entry and the instruction
-    // must still be the call verified in the 17489-dev XAM image.
+    // and neighboring instructions must match a known XAM image.
     typedef HRESULT (*DmSetMemoryFn)(void* destination, DWORD size,
                                      const void* source, DWORD* written);
 
@@ -68,9 +68,15 @@ namespace
 
     bool InstallEjectTitleExitPatch()
     {
-        // Verified live call site minus the loaded XAM image base.
-        static const DWORD kXamEjectLaunchOffset = 0x8176DCDCu - 0x815F0000u;
-        static const DWORD kExpectedCall = 0x4BFF11F5u;
+        static const struct
+        {
+            DWORD offset, call, after;
+            bool directWrite;
+            const char* build;
+        } candidates[] = {
+            {0x17DCDCu, 0x4BFF11F5u, 0x48000094u, false, "17489-dev"},
+            {0x0BE448u, 0x4BFF2929u, 0x48000094u, true, "17559"}
+        };
         static const DWORD kPowerPcNop = 0x60000000u;
         static const DWORD kDmSetMemoryOrdinal = 40;
 
@@ -83,17 +89,40 @@ namespace
         }
 
         const auto* entry = static_cast<const LdrDataTableEntryPrefix*>(xam);
-        if (!entry->imageBase || entry->imageSize < kXamEjectLaunchOffset + 8)
+        char diagnostic[160];
+        sprintf_s(diagnostic, sizeof(diagnostic), "Eject patch: XAM base=%08X size=%08X",
+                  static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(entry->imageBase)),
+                  static_cast<unsigned>(entry->imageSize));
+        BootLog(diagnostic);
+        volatile DWORD* site = NULL;
+        DWORD instruction = 0;
+        bool directWrite = false;
+        for (const auto& candidate : candidates)
         {
-            BootLog("Eject patch: XAM image does not contain the patch site", E_FAIL);
-            return false;
+            if (!entry->imageBase || entry->imageSize < candidate.offset + 8)
+                continue;
+            auto* address = reinterpret_cast<volatile DWORD*>(
+                static_cast<BYTE*>(entry->imageBase) + candidate.offset);
+            const DWORD word = *address;
+            sprintf_s(diagnostic, sizeof(diagnostic),
+                      "Eject patch: %s +%06X words=%08X %08X %08X %08X",
+                      candidate.build, static_cast<unsigned>(candidate.offset),
+                      static_cast<unsigned>(address[-2]), static_cast<unsigned>(address[-1]),
+                      static_cast<unsigned>(word), static_cast<unsigned>(address[1]));
+            BootLog(diagnostic);
+            if (address[-2] != 0x38A00000u || address[-1] != 0x38800000u ||
+                address[1] != candidate.after ||
+                (word != candidate.call && word != kPowerPcNop))
+                continue;
+            site = address;
+            instruction = word;
+            directWrite = candidate.directWrite;
+            char message[96];
+            sprintf_s(message, sizeof(message), "Eject patch: matched XAM %s", candidate.build);
+            BootLog(message);
+            break;
         }
-        volatile DWORD* const site =
-            reinterpret_cast<volatile DWORD*>(
-                static_cast<BYTE*>(entry->imageBase) + kXamEjectLaunchOffset);
-        const DWORD instruction = *site;
-        if (site[-1] != 0x38800000u || site[1] != 0x48000094u ||
-            (instruction != kExpectedCall && instruction != kPowerPcNop))
+        if (!site)
         {
             BootLog("Eject patch: unrecognized XAM build", E_FAIL);
             return false;
@@ -104,14 +133,55 @@ namespace
             return true;
         }
 
+        // Retail/RGH 17559's small XBDM does not export DmSetMemory. Its XAM
+        // image has already been identified by the exact surrounding code, so
+        // write only the single, verified instruction directly. Clear the
+        // instruction cache range before this code can be reached on eject.
+        if (directWrite)
+        {
+            BootLog("Eject patch: directly writing verified 17559 XAM site");
+            *site = kPowerPcNop;
+            // RXDK's clang runtime does not provide __clear_cache.  Perform
+            // the PPC data-to-instruction-cache handoff explicitly.
+            __asm__ volatile(
+                "dcbst 0, %0\n\t"
+                "sync\n\t"
+                "icbi 0, %0\n\t"
+                "sync\n\t"
+                "isync"
+                : : "r"(site) : "memory");
+            if (*site != kPowerPcNop)
+            {
+                BootLog("Eject patch: direct XAM write verification failed", E_FAIL);
+                return false;
+            }
+            BootLog("Eject patch: XAM tray fallback launch disabled");
+            return true;
+        }
+
         HANDLE xbdm = NULL;
         void* procedure = NULL;
         char xbdmName[] = "xbdm.xex";
-        if (XexGetModuleHandle(xbdmName, &xbdm) != 0 || !xbdm ||
-            XexGetProcedureAddress(xbdm, kDmSetMemoryOrdinal, &procedure) != 0 ||
-            !procedure)
+        const HRESULT moduleStatus = XexGetModuleHandle(xbdmName, &xbdm);
+        if (moduleStatus != 0)
         {
-            BootLog("Eject patch: XBDM memory writer unavailable", E_FAIL);
+            BootLog("Eject patch: xbdm.xex lookup failed", moduleStatus);
+            return false;
+        }
+        if (!xbdm)
+        {
+            BootLog("Eject patch: xbdm.xex lookup returned a null handle", E_FAIL);
+            return false;
+        }
+        const HRESULT exportStatus = XexGetProcedureAddress(xbdm, kDmSetMemoryOrdinal, &procedure);
+        if (exportStatus != 0)
+        {
+            BootLog("Eject patch: XBDM ordinal 40 lookup failed", exportStatus);
+            return false;
+        }
+        if (!procedure)
+        {
+            BootLog("Eject patch: XBDM ordinal 40 resolved to a null pointer", E_FAIL);
             return false;
         }
 

@@ -3,6 +3,13 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-25
+
+- Added a No Disc screen and automatic First Play when a DVD is reinserted.
+- On the verified 17489-dev XAM build with XBDM, eject no longer sends
+  360DVD back to the dashboard. Other XAM builds are left unchanged.
+- Disabled on-disk libdvdcss key caching while retaining in-session keys.
+
 ## [1.2.0] - 2026-11-25
 
 - Added field-rate FFmpeg `bwdif` deinterlacing with automatic field order
@@ -75,3 +82,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.0.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.0.0
 [1.1.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.1.0
 [1.2.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.2.0
+[1.3.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.0

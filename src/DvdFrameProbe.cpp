@@ -722,6 +722,16 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
 
 HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device)
 {
+    for (unsigned set = 0; set < 3; ++set)
+        for (unsigned i = 0; i < 3; ++i)
+            if (m_planes[set][i])
+            {
+                m_planes[set][i]->Release();
+                m_planes[set][i] = NULL;
+            }
+    m_width = m_height = m_textureSet = m_discSegment = 0;
+    m_untilNext = 0;
+    m_deinterlacingActive = false;
 #ifndef DVD360_LOGGING
     av_log_set_level(AV_LOG_QUIET);
 #endif

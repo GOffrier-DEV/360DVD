@@ -304,6 +304,12 @@ void DvdLogoBounce::Update(float elapsedSeconds)
         m_colorIndex = (m_colorIndex + 1) % kColorCount;
 }
 
+void DvdLogoBounce::Center()
+{
+    m_x = (float(m_screenWidth) - m_width) * 0.5f;
+    m_y = (float(m_screenHeight) - m_height) * 0.5f;
+}
+
 void DvdLogoBounce::Render()
 {
     if (!m_device || !m_texture || !m_vertexShader || !m_pixelShader)

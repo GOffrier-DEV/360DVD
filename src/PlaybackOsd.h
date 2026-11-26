@@ -25,6 +25,8 @@ public:
     void DrawMenuFocus(IDirect3DDevice9* device, float x, float y, float width, float height);
     void ShowTrackPopup(bool subtitle, unsigned track, const char* language);
     void ShowDeinterlacePopup();
+    void ShowNoDisc();
+    void DrawNoDisc();
     bool Ready() const { return m_decl != NULL; }
     void DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                     unsigned width, unsigned height, const BYTE* pixels, int pitch,

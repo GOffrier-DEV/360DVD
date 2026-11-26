@@ -399,6 +399,24 @@ void PlaybackOsd::StartPopup()
     }
 }
 
+void PlaybackOsd::ShowNoDisc()
+{
+    strcpy_s(m_trackPopup, sizeof(m_trackPopup), "NO DISC");
+    StartPopup();
+    m_trackPopupTime = 0;
+}
+
+void PlaybackOsd::DrawNoDisc()
+{
+    if (!m_stockPopup || FAILED(XuiRenderBegin(m_stockDc, 0))) return;
+    XuiElementSetOpacity(m_stockPopup, 1.0f);
+    XUIMessage msg;
+    XUIMessageRender render;
+    XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
+    XuiSendMessage(m_stockPopup, &msg);
+    XuiRenderEnd(m_stockDc);
+}
+
 void PlaybackOsd::DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                               unsigned width, unsigned height, const BYTE* pixels, int pitch,
                               const BYTE* palette, unsigned colors)

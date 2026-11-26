@@ -12,6 +12,10 @@
 #include <dvdread/dvd_udf.h>
 #include <limits.h>
 
+extern "C" HRESULT __stdcall XexGetModuleHandle(char* moduleName, HANDLE* module);
+extern "C" HRESULT __stdcall XexGetProcedureAddress(HANDLE module, DWORD ordinal,
+                                                      void* procedure);
+
 extern "C" unsigned dvd360_css_verified_sessions();
 extern "C" int32_t dvd360_css_last_error();
 
@@ -40,6 +44,87 @@ namespace
             CloseHandle(file);
         }
 #endif
+    }
+
+    // XAM normally responds to an optical-tray removal by launching its
+    // dashboard fallback, which terminates the current title. We retain
+    // XAM's media-change broadcast (360DVD consumes that to enter No Disc)
+    // and suppress only that fallback launch call.
+    //
+    // This is deliberately build-locked.  Never write a guessed address:
+    // XAM's image base comes from its loaded-module entry and the instruction
+    // must still be the call verified in the 17489-dev XAM image.
+    typedef HRESULT (*DmSetMemoryFn)(void* destination, DWORD size,
+                                     const void* source, DWORD* written);
+
+    struct LdrDataTableEntryPrefix
+    {
+        DWORD ignored[7];
+        void* imageBase;
+        DWORD imageSize;
+    };
+
+    bool InstallEjectTitleExitPatch()
+    {
+        static const DWORD kXamEjectLaunchOffset = 0x1DCDCu;
+        static const DWORD kExpectedCall = 0x4BFF11F5u;
+        static const DWORD kPowerPcNop = 0x60000000u;
+        static const DWORD kDmSetMemoryOrdinal = 40;
+
+        HANDLE xam = NULL;
+        char xamName[] = "xam.xex";
+        if (XexGetModuleHandle(xamName, &xam) != 0 || !xam)
+        {
+            BootLog("Eject patch: xam.xex module unavailable", E_FAIL);
+            return false;
+        }
+
+        const auto* entry = static_cast<const LdrDataTableEntryPrefix*>(xam);
+        if (!entry->imageBase || entry->imageSize < kXamEjectLaunchOffset + 8)
+        {
+            BootLog("Eject patch: XAM image does not contain the patch site", E_FAIL);
+            return false;
+        }
+        volatile DWORD* const site =
+            reinterpret_cast<volatile DWORD*>(
+                static_cast<BYTE*>(entry->imageBase) + kXamEjectLaunchOffset);
+        const DWORD instruction = *site;
+        if (site[-1] != 0x38800000u || site[1] != 0x48000094u ||
+            (instruction != kExpectedCall && instruction != kPowerPcNop))
+        {
+            BootLog("Eject patch: unrecognized XAM build", E_FAIL);
+            return false;
+        }
+        if (instruction == kPowerPcNop)
+        {
+            BootLog("Eject patch: XAM tray fallback launch already disabled");
+            return true;
+        }
+
+        HANDLE xbdm = NULL;
+        void* procedure = NULL;
+        char xbdmName[] = "xbdm.xex";
+        if (XexGetModuleHandle(xbdmName, &xbdm) != 0 || !xbdm ||
+            XexGetProcedureAddress(xbdm, kDmSetMemoryOrdinal, &procedure) != 0 ||
+            !procedure)
+        {
+            BootLog("Eject patch: XBDM memory writer unavailable", E_FAIL);
+            return false;
+        }
+
+        DWORD written = 0;
+        const HRESULT result = reinterpret_cast<DmSetMemoryFn>(procedure)(
+            const_cast<DWORD*>(site),
+            sizeof(kPowerPcNop), &kPowerPcNop, &written);
+        if (FAILED(result) || written != sizeof(kPowerPcNop) || *site != kPowerPcNop)
+        {
+            BootLog("Eject patch: XAM write verification failed",
+                    FAILED(result) ? result : E_FAIL);
+            return false;
+        }
+
+        BootLog("Eject patch: XAM tray fallback launch disabled");
+        return true;
     }
 
     class PlaybackLog
@@ -417,6 +502,7 @@ namespace
     int Run()
     {
         BootLog("360DVD boot");
+        InstallEjectTitleExitPatch();
         if (PlaybackAffinity::Enabled())
         {
             PlaybackAffinity::Pin(PlaybackAffinity::Renderer);
@@ -474,6 +560,8 @@ namespace
 
         BootLog("DVD logo rendering");
         DvdFrameProbe frame;
+        const DWORD discMediaChanged = 0x8000000D;
+        const HANDLE discListener = XNotifyCreateListener(XNOTIFY_SYSTEM);
         BootLog("Opening optical DVD at First Play");
         device->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
         if (SUCCEEDED(device->BeginScene()))
@@ -485,7 +573,7 @@ namespace
         const HRESULT discStatus = frame.DecodeMpeg2(device);
         const bool discPlayback = discStatus == S_OK;
         bool showFrame = discPlayback;
-        const bool compressed = discPlayback;
+        bool compressed = discPlayback;
         BootLog(discPlayback ? "DVD First Play stream primed" : "DVD First Play startup failed", discStatus);
         if (compressed && showFrame)
         {
@@ -513,7 +601,7 @@ namespace
 #endif
         static PlaybackOsd osd;
         unsigned subtitleCount = frame.SubtitleCount();
-        const HRESULT osdStatus = showFrame && compressed ? osd.Open(device) : S_FALSE;
+        const HRESULT osdStatus = osd.Open(device);
         bool osdReady = false;
         if (osdStatus == S_OK)
         {
@@ -558,6 +646,15 @@ namespace
         char audioStartLog[96] = {};
         HRESULT audioStartStatus = S_OK;
         bool switchingAudio = false;
+        // XAM's disc-change broadcast carries zero when media is removed.
+        bool noDisc = !discPlayback;
+        const LONGLONG discProbeInterval = 2 * frequency.QuadPart;
+        LONGLONG nextDiscProbe = previous.QuadPart + discProbeInterval;
+        if (noDisc)
+        {
+            animation.Center();
+            if (osdReady) osd.ShowNoDisc();
+        }
 
         for (;;)
         {
@@ -570,6 +667,55 @@ namespace
             bool playbackEnded = false;
             bool userStopped = false;
             bool resumed = false;
+            DWORD notification;
+            ULONG_PTR media;
+            while (discListener && discListener != INVALID_HANDLE_VALUE &&
+                   XNotifyGetNext(discListener, discMediaChanged, &notification, &media))
+            {
+                if (media != 0)
+                {
+                    continue;
+                }
+                if (noDisc) continue;
+                noDisc = true;
+                playbackEnded = capture;
+                showFrame = switchingAudio = embeddedAudio = false;
+                frame.Stop();
+                animation.Center();
+                if (!osdReady)
+                {
+                    const char* stage;
+                    osdReady = SUCCEEDED(osd.OpenStock(device, &present, stage));
+                }
+                if (osdReady) osd.ShowNoDisc();
+                BootLog("DVD media removed");
+                nextDiscProbe = now.QuadPart + discProbeInterval;
+            }
+            // A tray close does not always deliver a usable insertion event.
+            // Retry only while idle, with a delay between completed attempts.
+            if (noDisc && !playbackEnded && now.QuadPart >= nextDiscProbe)
+            {
+                const HRESULT status = frame.DecodeMpeg2(device);
+                BootLog("DVD idle probe: opening First Play", status);
+                QueryPerformanceCounter(&previous);
+                nextDiscProbe = previous.QuadPart + discProbeInterval;
+                if (status == S_OK)
+                {
+                    noDisc = paused = embeddedAudio = playbackClockStarted = false;
+                    showFrame = compressed = capture = true;
+                    playbackSeconds = 0;
+                    playbackDuration = frame.DurationSeconds();
+                    discSegment = frame.DiscSegment();
+                    subtitle = 0;
+                    subtitleCount = frame.SubtitleCount();
+                    deinterlaceNotified = false;
+                    presentedFrames = lastPresented = missedFrames = 0;
+                    traceCount = traceOmitted = 0;
+                    presentTicks = 0;
+                    nextProgress = previous.QuadPart + 2 * frequency.QuadPart;
+                    playbackLog.Open();
+                }
+            }
             if (switchingAudio)
             {
                 const HRESULT status = frame.PollAudioTrack(paused);
@@ -685,8 +831,18 @@ namespace
                 }
                 else if (FAILED(status))
                 {
-                    playbackEnded = true;
+                    // An eject can reach FFmpeg as a read failure before (or
+                    // instead of) XAM's media-change notification. Keep the
+                    // title alive and use the normal idle re-probe path.
+                    noDisc = true;
+                    playbackEnded = capture;
                     showFrame = false;
+                    switchingAudio = embeddedAudio = false;
+                    animation.Center();
+                    frame.Stop();
+                    if (osdReady) osd.ShowNoDisc();
+                    BootLog("DVD stream lost; awaiting replacement media", status);
+                    nextDiscProbe = now.QuadPart + discProbeInterval;
                 }
             }
             if (osdReady && showFrame && capture && !playbackEnded &&
@@ -698,7 +854,7 @@ namespace
             }
             LARGE_INTEGER advanceEnd;
             QueryPerformanceCounter(&advanceEnd);
-            animation.Update(elapsed);
+            if (!noDisc) animation.Update(elapsed);
             device->Clear(0, NULL, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
             bool drewVideo = false;
             if (SUCCEEDED(device->BeginScene()))
@@ -718,7 +874,9 @@ namespace
                 else
                     animation.Render();
                 device->EndScene();
-                if (osdReady && showFrame && capture && !playbackEnded)
+                if (osdReady && noDisc)
+                    osd.DrawNoDisc();
+                else if (osdReady && showFrame && capture && !playbackEnded)
                     osd.DrawStock(paused, elapsed, playbackSeconds, playbackDuration,
                                    frame.TrackLanguage(false),
                                   frame.TrackLanguage(true, subtitle), subtitle);
@@ -857,6 +1015,7 @@ namespace
             }
         }
 
+        if (discListener && discListener != INVALID_HANDLE_VALUE) CloseHandle(discListener);
         animation.Shutdown();
         osd.CloseStock();
         device->Release();

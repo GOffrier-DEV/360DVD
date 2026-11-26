@@ -917,8 +917,9 @@ static dvd_file_t *DVDOpenFileUDF( dvd_reader_t *ctx, const char *filename,
   dvd_file->filesize = BYTES_TO_DVD_BLOCKS_CEIL(len);
 
   /* Read the whole file in cache (unencrypted) if asked and if it doesn't
-   * exceed 128KB */
-  if( do_cache && len < 64 * DVD_VIDEO_LB_LEN ) {
+   * exceed 4MB. Physical DVD streams benefit from avoiding per-sector IFO
+   * seeks while libdvdnav walks PGCIT and PGCI_UT tables. */
+  if( do_cache && len < 2048 * DVD_VIDEO_LB_LEN ) {
     int ret;
     size_t cache_bytes = (size_t)dvd_file->filesize * DVD_VIDEO_LB_LEN;
 
@@ -1028,7 +1029,8 @@ static int findDVDFile( dvd_reader_t *dvd, const char *file, char *filename )
 /**
  * Open an unencrypted file from a DVD directory tree.
  */
-static dvd_file_t *DVDOpenFilePath( dvd_reader_t *ctx, const char *filename )
+static dvd_file_t *DVDOpenFilePath( dvd_reader_t *ctx, const char *filename,
+                                    int do_cache )
 {
   char full_path[ PATH_MAX + 1 ];
   dvd_file_t *dvd_file;
@@ -1066,6 +1068,27 @@ static dvd_file_t *DVDOpenFilePath( dvd_reader_t *ctx, const char *filename )
   dvd_file->title_devs[ 0 ] = dev;
   dvd_file->filesize = dvd_file->title_sizes[ 0 ];
 
+  /* Match DVDOpenFileUDF: cache small IFO/BUP files. On physical stream
+   * readers this avoids hundreds of individual optical reads while parsing
+   * PGCIT and menu language-unit tables. */
+  if( do_cache && dvd_file->filesize > 0 && dvd_file->filesize < 2048 ) {
+    size_t cache_bytes = (size_t)dvd_file->filesize * DVD_VIDEO_LB_LEN;
+    dvd_file->cache = malloc( cache_bytes );
+    if( dvd_file->cache ) {
+      int ret;
+      if( ctx->dvdinput_seek( dev, 0 ) != 0 ) {
+        ret = -1;
+      } else {
+        ret = ctx->dvdinput_read( dev, (char *)dvd_file->cache,
+                                  (int)dvd_file->filesize, DVDINPUT_NOFLAGS );
+      }
+      if( ret != dvd_file->filesize ) {
+        free( dvd_file->cache );
+        dvd_file->cache = NULL;
+      }
+    }
+  }
+
   return dvd_file;
 }
 
@@ -1087,7 +1110,7 @@ static uint8_t *cppm_get_mkb_or_backup( dvd_reader_t *ctx, int backup )
   {
     char full_path[ PATH_MAX + 1 ];
     if( !findDVDFile( ctx, filename, full_path ) ) return NULL;
-    mkb_file= DVDOpenFilePath( ctx, full_path );
+    mkb_file= DVDOpenFilePath( ctx, full_path, 0 );
   }
 
   if ( !mkb_file )
@@ -1513,7 +1536,7 @@ dvd_file_t *DVDOpenFile( dvd_reader_t *ctx, int titlenum,
   if( dvd->isImageFile ) {
     return DVDOpenFileUDF( ctx, filename, do_cache );
   } else {
-    return DVDOpenFilePath( ctx, filename );
+    return DVDOpenFilePath( ctx, filename, do_cache );
   }
 }
 
@@ -1990,6 +2013,16 @@ ssize_t DVDReadBytes( dvd_file_t *dvd_file, void *data, size_t byte_size )
   /* Check arguments. */
   if( dvd_file == NULL || data == NULL || (ssize_t)byte_size < 0 )
     return -1;
+
+  if( dvd_file->cache ) {
+    size_t file_bytes = (size_t)dvd_file->filesize * DVD_VIDEO_LB_LEN;
+    if( dvd_file->seek_pos > file_bytes ||
+        byte_size > file_bytes - dvd_file->seek_pos )
+      return 0;
+    memcpy( data, dvd_file->cache + dvd_file->seek_pos, byte_size );
+    DVDFileSeekForce( dvd_file, dvd_file->seek_pos + byte_size, -1 );
+    return byte_size;
+  }
 
   seek_sector = dvd_file->seek_pos / DVD_VIDEO_LB_LEN;
   seek_byte   = dvd_file->seek_pos % DVD_VIDEO_LB_LEN;

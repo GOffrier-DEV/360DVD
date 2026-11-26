@@ -3,6 +3,11 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.4] - 2026-11-26
+
+- Reduced slow DVD First Play startup by caching small physical-disc IFO/BUP
+  files, avoiding repeated optical reads while loading navigation tables.
+
 ## [1.5.3] - 2026-11-25
 
 - Added a guarded direct-write fallback for the verified 17559 XAM eject

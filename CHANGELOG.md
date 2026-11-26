@@ -3,6 +3,11 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-11-25
+
+- Check the optical drive every 250 ms for disc removal, including during
+  still DVD menus and paused playback.
+
 ## [1.3.0] - 2026-11-25
 
 - Added a No Disc screen and automatic First Play when a DVD is reinserted.
@@ -83,3 +88,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.1.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.1.0
 [1.2.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.2.0
 [1.3.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.0
+[1.3.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.1

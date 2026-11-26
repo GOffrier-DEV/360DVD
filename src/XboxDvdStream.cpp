@@ -29,6 +29,9 @@ extern "C" LONG NTAPI NtOpenFile(HANDLE*, ULONG, DvdObjectAttributes*,
                                 DvdIoStatus*, ULONG, ULONG);
 extern "C" LONG NTAPI NtReadFile(HANDLE, HANDLE, void*, void*, DvdIoStatus*,
                                 void*, ULONG, LARGE_INTEGER*);
+extern "C" LONG NTAPI NtDeviceIoControlFile(HANDLE, HANDLE, void*, void*,
+                                          DvdIoStatus*, ULONG, void*, ULONG,
+                                          void*, ULONG);
 
 namespace
 {
@@ -78,6 +81,34 @@ namespace
     {
         return StreamReadVectors(stream, vectors, count);
     }
+}
+
+bool XboxDvdStream::DriveReportsNoMedia()
+{
+    const ULONG checkVerify = 0x24800; // IOCTL_CDROM_CHECK_VERIFY
+    const LONG noMedia = (LONG)0xC0000013; // STATUS_NO_MEDIA_IN_DEVICE
+    static const char path[] = "\\Device\\Cdrom0";
+    DvdObjectName name = { sizeof(path) - 1, sizeof(path), path };
+    DvdObjectAttributes attributes = { NULL, &name, kCaseInsensitive };
+    DvdIoStatus io = {};
+    HANDLE device = NULL;
+    LONG status = NtOpenFile(&device, FILE_READ_DATA | SYNCHRONIZE, &attributes,
+                             &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             kSynchronousNonAlert);
+    if (status != 0)
+        return status == noMedia;
+    status = io.status;
+    if (status == 0 && device)
+    {
+        io = {};
+        status = NtDeviceIoControlFile(device, NULL, NULL, NULL, &io,
+                                       checkVerify, NULL, 0, NULL, 0);
+        if (status == 0)
+            status = io.status;
+    }
+    if (device)
+        CloseHandle(device);
+    return status == noMedia;
 }
 
 dvd_reader_stream_cb* XboxDvdStream::ReaderCallbacks()

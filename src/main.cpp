@@ -650,6 +650,10 @@ namespace
         bool noDisc = !discPlayback;
         const LONGLONG discProbeInterval = 2 * frequency.QuadPart;
         LONGLONG nextDiscProbe = previous.QuadPart + discProbeInterval;
+        // Keep removal detection responsive without opening the drive on
+        // every rendered frame. Reinsertion probes remain less frequent.
+        const LONGLONG removalCheckInterval = frequency.QuadPart / 4;
+        LONGLONG nextRemovalCheck = previous.QuadPart + removalCheckInterval;
         if (noDisc)
         {
             animation.Center();
@@ -669,14 +673,23 @@ namespace
             bool resumed = false;
             DWORD notification;
             ULONG_PTR media;
+            bool mediaRemoved = false;
             while (discListener && discListener != INVALID_HANDLE_VALUE &&
                    XNotifyGetNext(discListener, discMediaChanged, &notification, &media))
             {
-                if (media != 0)
-                {
-                    continue;
-                }
-                if (noDisc) continue;
+                if (media == 0) mediaRemoved = true;
+            }
+            // Still menus and paused playback may issue no sector reads.
+            // Poll the drive independently of the decoder and XAM events.
+            if (!noDisc && !mediaRemoved && now.QuadPart >= nextRemovalCheck)
+            {
+                mediaRemoved = XboxDvdStream::DriveReportsNoMedia();
+                LARGE_INTEGER checked;
+                QueryPerformanceCounter(&checked);
+                nextRemovalCheck = checked.QuadPart + removalCheckInterval;
+            }
+            if (!noDisc && mediaRemoved)
+            {
                 noDisc = true;
                 playbackEnded = capture;
                 showFrame = switchingAudio = embeddedAudio = false;
@@ -713,6 +726,7 @@ namespace
                     traceCount = traceOmitted = 0;
                     presentTicks = 0;
                     nextProgress = previous.QuadPart + 2 * frequency.QuadPart;
+                    nextRemovalCheck = previous.QuadPart + removalCheckInterval;
                     playbackLog.Open();
                 }
             }

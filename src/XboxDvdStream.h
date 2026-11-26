@@ -19,6 +19,7 @@ public:
     bool Seek(unsigned long long byteOffset);
     int Read(void* buffer, int byteCount);
     LONG LastStatus() const { return m_status; }
+    static bool DriveReportsNoMedia();
     // The stream must outlive the reader returned by DVDOpenStream.
     static dvd_reader_stream_cb* ReaderCallbacks();
     static dvd_reader_stream_cb* ReaderAuthCallbacks();

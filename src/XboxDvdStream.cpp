@@ -111,6 +111,101 @@ bool XboxDvdStream::DriveReportsNoMedia()
     return status == noMedia;
 }
 
+HRESULT XboxDvdStream::ProbeCdAudio(CdAudioProbe& probe)
+{
+    probe = {};
+    probe.stage = "open";
+    if (!Open())
+        return HRESULT_FROM_NT(LastStatus());
+
+    const ULONG readToc = 0x24002;
+    __declspec(align(16)) BYTE toc[804] = {};
+    DvdIoStatus io = {};
+    probe.stage = "read TOC";
+    LONG status = NtDeviceIoControlFile(m_device, NULL, NULL, NULL, &io,
+                                        readToc, NULL, 0, toc, sizeof(toc));
+    if (status == 0) status = io.status;
+    probe.tocBytes = static_cast<unsigned>(io.information);
+    probe.tocLength = 2 + (toc[0] << 8) + toc[1];
+    probe.tocFirst = toc[2];
+    probe.tocLast = toc[3];
+    if (status != 0) return HRESULT_FROM_NT(status);
+
+    probe.stage = "parse TOC";
+    const unsigned tocSize = probe.tocLength;
+    if (tocSize < 20 || tocSize > sizeof(toc) || tocSize > io.information ||
+        toc[2] == 0 || toc[3] < toc[2] || toc[3] > 99 ||
+        tocSize < 4 + 8u * (toc[3] - toc[2] + 2))
+        return E_FAIL;
+
+    const unsigned trackCount = toc[3] - toc[2] + 1;
+    unsigned lbas[100];
+    for (unsigned i = 0; i <= trackCount; ++i)
+    {
+        const BYTE* track = toc + 4 + i * 8;
+        const unsigned number = i == trackCount ? 0xAA : toc[2] + i;
+        if (track[2] != number || track[6] >= 60 || track[7] >= 75)
+            return E_FAIL;
+        const unsigned frames = (track[5] * 60u + track[6]) * 75u + track[7];
+        if (frames < 150) return E_FAIL;
+        lbas[i] = frames - 150;
+        if (i && lbas[i] <= lbas[i - 1]) return E_FAIL;
+    }
+    for (unsigned i = 0; i < trackCount; ++i)
+    {
+        const BYTE* track = toc + 4 + i * 8;
+        if (track[1] & 0x04)
+            ++probe.dataTracks;
+        else
+        {
+            if (!probe.audioTracks)
+            {
+                probe.firstTrack = track[2];
+                probe.startLba = lbas[i];
+                probe.endLba = lbas[i + 1];
+            }
+            probe.tracks[probe.audioTracks++] = {lbas[i], lbas[i + 1]};
+        }
+    }
+    if (!probe.audioTracks)
+    {
+        probe.stage = "no audio tracks";
+        return S_FALSE;
+    }
+
+    probe.stage = "raw read";
+    __declspec(align(16)) BYTE pcm[2352];
+    return ReadCdAudio(probe.startLba, 1, pcm, probe.bytesRead);
+}
+
+HRESULT XboxDvdStream::ReadCdAudio(unsigned lba, unsigned sectors, void* pcm,
+                                 unsigned& bytesRead)
+{
+    bytesRead = 0;
+    if (!IsOpen() || !pcm || !sectors || sectors > 55)
+        return E_INVALIDARG;
+    const ULONG rawRead = 0x2403E;
+    struct RawReadRequest
+    {
+        LARGE_INTEGER byteOffset;
+        ULONG sectors;
+        ULONG mode;
+    };
+    static_assert(sizeof(RawReadRequest) == 16, "Xbox CD raw-read layout");
+    RawReadRequest request = {};
+    request.byteOffset.QuadPart = static_cast<LONGLONG>(lba) * 2048;
+    request.sectors = sectors;
+    request.mode = 2; // CDDA
+    const unsigned size = sectors * 2352;
+    DvdIoStatus io = {};
+    LONG status = NtDeviceIoControlFile(m_device, NULL, NULL, NULL, &io, rawRead,
+                                       &request, sizeof(request), pcm, size);
+    if (status == 0) status = io.status;
+    bytesRead = static_cast<unsigned>(io.information);
+    if (status != 0) return HRESULT_FROM_NT(status);
+    return bytesRead == size ? S_OK : E_FAIL;
+}
+
 dvd_reader_stream_cb* XboxDvdStream::ReaderCallbacks()
 {
     static dvd_reader_stream_cb callbacks = {

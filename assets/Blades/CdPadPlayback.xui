@@ -1,0 +1,37 @@
+<XuiCanvas version="000c">
+<Properties><Width>720.000000</Width><Height>480.000000</Height></Properties>
+<XuiScene>
+<Properties><Id>CdPadPlayback</Id><Width>720.000000</Width><Height>480.000000</Height><DefaultFocus>btn_Play</DefaultFocus></Properties>
+<XuiLabel>
+<Properties>
+<Id>buttonBackground</Id><Width>205.000000</Width><Height>53.000000</Height>
+<Position>294.400000,396.000000,0.000000</Position><Scale>0.640000,0.620000,1.000000</Scale>
+<Visual>osui_graphicButtonBG_new</Visual>
+</Properties>
+</XuiLabel>
+<XuiButton>
+<Properties>
+<Id>btn_Last</Id><Width>56.000000</Width><Height>45.000000</Height>
+<Position>304.400000,398.000000,0.000000</Position><Scale>0.640000,0.620000,1.000000</Scale>
+<Visual>osui_btn_Small1</Visual><Text>Previous track</Text>
+<ImagePath>dvd360:///ico_32x_last_black.png</ImagePath>
+</Properties>
+</XuiButton>
+<XuiButton>
+<Properties>
+<Id>btn_Play</Id><Width>56.000000</Width><Height>45.000000</Height>
+<Position>342.080000,398.000000,0.000000</Position><Scale>0.640000,0.620000,1.000000</Scale>
+<Visual>osui_btn_Small1</Visual><Text>Play / Pause</Text>
+<ImagePath>dvd360:///ico_32x_pause_black.png</ImagePath>
+</Properties>
+</XuiButton>
+<XuiButton>
+<Properties>
+<Id>btn_Next</Id><Width>56.000000</Width><Height>45.000000</Height>
+<Position>379.760000,398.000000,0.000000</Position><Scale>0.640000,0.620000,1.000000</Scale>
+<Visual>osui_btn_Small1</Visual><Text>Next track</Text>
+<ImagePath>dvd360:///ico_32x_next_black.png</ImagePath>
+</Properties>
+</XuiButton>
+</XuiScene>
+</XuiCanvas>

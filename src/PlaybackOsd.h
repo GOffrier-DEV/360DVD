@@ -27,6 +27,9 @@ public:
     void ShowDeinterlacePopup();
     void ShowNoDisc();
     void DrawNoDisc();
+    Action UpdateCd();
+    void DrawCd(bool paused, double elapsed);
+    void ResetCdFocus();
     bool Ready() const { return m_decl != NULL; }
     void DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                     unsigned width, unsigned height, const BYTE* pixels, int pitch,
@@ -47,6 +50,11 @@ private:
     double m_visible;
     HXUIDC m_stockDc;
     HXUIOBJ m_stockScenes[2], m_stockPopup;
+    HXUIOBJ m_cdScene = NULL;
+    unsigned m_cdSelected = 1;
+    int m_cdFocused = -1;
+    int m_cdPaused = -1;
+    DWORD ReadPressedButtons();
     bool m_stockRender, m_stockRuntime;
     unsigned m_stockPage;
     bool m_stockInfo;

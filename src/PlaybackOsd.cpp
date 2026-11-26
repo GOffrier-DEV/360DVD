@@ -127,6 +127,7 @@ HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAME
     if (FAILED(hr)) CloseStock();
     else
     {
+        XuiSceneCreate(root, L"CdPadPlayback.xur", NULL, &m_cdScene);
         stage = SUCCEEDED(XuiSceneCreate(root, L"DvdTrackPopup.xur", NULL, &m_stockPopup))
             ? "Stock XUI: ready" : "Stock XUI: ready (track popup asset unavailable)";
     }
@@ -135,6 +136,10 @@ HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAME
 
 void PlaybackOsd::CloseStock()
 {
+    if (m_cdScene) XuiDestroyObject(m_cdScene);
+    m_cdScene = NULL;
+    ResetCdFocus();
+    m_cdPaused = -1;
     if (m_stockPopup) XuiDestroyObject(m_stockPopup);
     m_stockPopup = NULL;
     for (unsigned i = 0; i < 2; ++i)
@@ -242,7 +247,7 @@ HRESULT PlaybackOsd::Open(IDirect3DDevice9* device)
     return device->CreateVertexDeclaration(elements, &m_decl);
 }
 
-PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused, bool discButtons, bool discStill)
+DWORD PlaybackOsd::ReadPressedButtons()
 {
     DWORD pressed = 0;
     for (DWORD pad = 0; pad < 4; ++pad)
@@ -258,6 +263,58 @@ PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused, bool discBu
         pressed |= buttons & ~m_buttons[pad];
         m_buttons[pad] = buttons;
     }
+    return pressed;
+}
+
+PlaybackOsd::Action PlaybackOsd::UpdateCd()
+{
+    const DWORD pressed = ReadPressedButtons();
+    const DWORD horizontal = pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT);
+    if (horizontal == XINPUT_GAMEPAD_DPAD_LEFT && m_cdSelected > 0) --m_cdSelected;
+    if (horizontal == XINPUT_GAMEPAD_DPAD_RIGHT && m_cdSelected < 2) ++m_cdSelected;
+    if (pressed & XINPUT_GAMEPAD_START) return TogglePause;
+    if (!(pressed & XINPUT_GAMEPAD_A)) return None;
+    return m_cdSelected == 0 ? PreviousChapter :
+           m_cdSelected == 1 ? TogglePause : NextChapter;
+}
+
+void PlaybackOsd::ResetCdFocus()
+{
+    m_cdSelected = 1;
+    m_cdFocused = -1;
+}
+
+void PlaybackOsd::DrawCd(bool paused, double elapsed)
+{
+    if (!m_cdScene) return;
+    const wchar_t* ids[] = {L"btn_Last", L"btn_Play", L"btn_Next"};
+    HXUIOBJ button;
+    if (m_cdFocused != int(m_cdSelected) &&
+        SUCCEEDED(XuiElementGetChildById(m_cdScene, ids[m_cdSelected], &button)))
+    {
+        XuiElementSetFocus(button);
+        m_cdFocused = int(m_cdSelected);
+    }
+    if (m_cdPaused != int(paused) &&
+        SUCCEEDED(XuiElementGetChildById(m_cdScene, ids[1], &button)) &&
+        SUCCEEDED(XuiControlSetImagePath(button, paused ? L"dvd360:///ico_32x_play_black.png" :
+                                                        L"dvd360:///ico_32x_pause_black.png")))
+        m_cdPaused = int(paused);
+    XuiAnimRun(static_cast<float>(elapsed * 1000));
+    XuiTimersRun();
+    if (SUCCEEDED(XuiRenderBegin(m_stockDc, 0)))
+    {
+        XUIMessage msg;
+        XUIMessageRender render;
+        XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
+        XuiSendMessage(m_cdScene, &msg);
+        XuiRenderEnd(m_stockDc);
+    }
+}
+
+PlaybackOsd::Action PlaybackOsd::Update(double elapsed, bool paused, bool discButtons, bool discStill)
+{
+    const DWORD pressed = ReadPressedButtons();
     if (!paused)
         m_visible = m_visible > elapsed ? m_visible - elapsed : 0;
     if (!pressed)

@@ -3,6 +3,13 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-25
+
+- Added audio CD playback from the optical drive through XAudio2. Data
+  tracks are skipped on mixed-mode CDs.
+- Added a compact Blades overlay with previous track, play/pause, and next
+  track controls. D-pad focus starts on Play/Pause and stops at the ends.
+
 ## [1.3.1] - 2026-11-25
 
 - Check the optical drive every 250 ms for disc removal, including during
@@ -89,3 +96,4 @@ First release: a DVD player for RGH/JTAG Xbox 360 consoles.
 [1.2.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.2.0
 [1.3.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.0
 [1.3.1]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.3.1
+[1.4.0]: https://github.com/GOffrier-DEV/360DVD/releases/tag/v1.4.0

@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <xaudio2.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "DvdLogoBounce.h"
@@ -125,6 +126,188 @@ namespace
 
         BootLog("Eject patch: XAM tray fallback launch disabled");
         return true;
+    }
+
+    class CdAudioPlayer
+    {
+    public:
+        ~CdAudioPlayer() { Stop(); }
+
+        bool Start();
+        bool HasDisc() const { return thread != NULL; }
+        bool Paused() { return InterlockedCompareExchange(&paused, 0, 0) != 0; }
+        void TogglePause() { InterlockedExchange(&paused, Paused() ? 0 : 1); }
+        void Skip(LONG direction) { InterlockedExchange(&skip, direction); }
+        void Stop()
+        {
+            if (!thread) return;
+            SetEvent(stop);
+            WaitForSingleObject(thread, INFINITE);
+            CloseHandle(thread);
+            CloseHandle(stop);
+            thread = stop = NULL;
+        }
+
+    private:
+        static DWORD WINAPI Run(void* context)
+        {
+            CdAudioPlayer& player = *static_cast<CdAudioPlayer*>(context);
+            const HRESULT status = player.Play();
+            BootLog(status == S_OK ? "CD audio finished" :
+                    status == S_FALSE ? "CD audio stopped" : "CD audio playback failed", status);
+            return 0;
+        }
+        HRESULT Play();
+        HANDLE stop = NULL;
+        HANDLE thread = NULL;
+        volatile LONG paused = 0;
+        volatile LONG skip = 0;
+        XboxDvdStream::CdAudioProbe probe = {};
+    };
+
+    bool CdAudioPlayer::Start()
+    {
+        XboxDvdStream stream;
+        const HRESULT status = stream.ProbeCdAudio(probe);
+        char line[240];
+        sprintf_s(line, sizeof(line),
+                  "CD audio probe (%s): TOC bytes=%u length=%u tracks=%u-%u audio=%u data=%u first track=%u LBA=[%u,%u) raw bytes=%u",
+                  probe.stage, probe.tocBytes, probe.tocLength, probe.tocFirst, probe.tocLast,
+                  probe.audioTracks, probe.dataTracks, probe.firstTrack,
+                  probe.startLba, probe.endLba, probe.bytesRead);
+        BootLog(line, status);
+        if (status != S_OK) return false;
+        InterlockedExchange(&paused, 0);
+        InterlockedExchange(&skip, 0);
+        stop = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (stop) thread = CreateThread(NULL, 0, Run, this, 0, NULL);
+        if (thread) return true;
+        if (stop) CloseHandle(stop);
+        stop = NULL;
+        BootLog("CD audio worker could not start", E_FAIL);
+        return false;
+    }
+
+    HRESULT CdAudioPlayer::Play()
+    {
+        XboxDvdStream stream;
+        if (!stream.Open()) return HRESULT_FROM_NT(stream.LastStatus());
+        IXAudio2* engine = NULL;
+        IXAudio2MasteringVoice* master = NULL;
+        IXAudio2SourceVoice* voice = NULL;
+        HRESULT hr = XAudio2Create(&engine, 0, XboxThread5);
+        if (SUCCEEDED(hr)) hr = engine->CreateMasteringVoice(&master);
+        WAVEFORMATEX format = {};
+        format.wFormatTag = WAVE_FORMAT_PCM;
+        format.nChannels = 2;
+        format.nSamplesPerSec = 44100;
+        format.wBitsPerSample = 16;
+        format.nBlockAlign = 4;
+        format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+        if (SUCCEEDED(hr)) hr = engine->CreateSourceVoice(&voice, &format);
+        const unsigned slots = 4, batch = 12, sectorBytes = 2352;
+        BYTE* storage = static_cast<BYTE*>(malloc(slots * batch * sectorBytes + 15));
+        if (!storage && SUCCEEDED(hr)) hr = E_OUTOFMEMORY;
+        BYTE* buffers = reinterpret_cast<BYTE*>((reinterpret_cast<uintptr_t>(storage) + 15) &
+                                                 ~static_cast<uintptr_t>(15));
+        unsigned next = 0;
+        bool started = false;
+        bool loggedStart = false;
+        unsigned track = 0;
+        unsigned lba = probe.tracks[0].start;
+        while (hr == S_OK)
+        {
+            if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+            {
+                hr = S_FALSE;
+                break;
+            }
+            const LONG jump = InterlockedExchange(&skip, 0);
+            if (jump)
+            {
+                hr = voice->Stop();
+                if (SUCCEEDED(hr)) hr = voice->FlushSourceBuffers();
+                if (FAILED(hr)) break;
+                started = false;
+                next = 0;
+                const LONG target = static_cast<LONG>(track) + jump;
+                track = target < 0 ? 0 : static_cast<unsigned>(target);
+                if (track >= probe.audioTracks) track = probe.audioTracks - 1;
+                lba = probe.tracks[track].start;
+            }
+            if (Paused())
+            {
+                if (started) hr = voice->Stop();
+                started = false;
+                WaitForSingleObject(stop, 5);
+                continue;
+            }
+            if (!started)
+            {
+                hr = voice->Start();
+                if (FAILED(hr)) break;
+                started = true;
+                if (!loggedStart)
+                {
+                    BootLog("CD audio: XAudio2 started (byte-swapped PCM)");
+                    loggedStart = true;
+                }
+            }
+            if (track < probe.audioTracks)
+            {
+                const auto& range = probe.tracks[track];
+                XAUDIO2_VOICE_STATE state;
+                voice->GetState(&state);
+                if (lba == range.end)
+                {
+                    if (state.BuffersQueued)
+                    {
+                        WaitForSingleObject(stop, 5);
+                        continue;
+                    }
+                    if (++track == probe.audioTracks)
+                    {
+                        track = 0;
+                        InterlockedExchange(&paused, 1);
+                    }
+                    lba = probe.tracks[track].start;
+                    continue;
+                }
+                if (WaitForSingleObject(stop, state.BuffersQueued == slots ? 5 : 0) == WAIT_OBJECT_0)
+                {
+                    hr = S_FALSE;
+                    break;
+                }
+                if (state.BuffersQueued == slots) continue;
+                const unsigned sectors = range.end - lba < batch ? range.end - lba : batch;
+                unsigned bytes = 0;
+                BYTE* pcm = buffers + next * batch * sectorBytes;
+                hr = stream.ReadCdAudio(lba, sectors, pcm, bytes);
+                if (FAILED(hr)) break;
+                // The drive's CDDA samples need a byte swap for XAudio2 PCM.
+                for (unsigned i = 0; i < bytes; i += 2)
+                {
+                    const BYTE first = pcm[i];
+                    pcm[i] = pcm[i + 1];
+                    pcm[i + 1] = first;
+                }
+                XAUDIO2_BUFFER buffer = {};
+                buffer.AudioBytes = bytes;
+                buffer.pAudioData = pcm;
+                lba += sectors;
+                if (track + 1 == probe.audioTracks && lba == range.end)
+                    buffer.Flags = XAUDIO2_END_OF_STREAM;
+                hr = voice->SubmitSourceBuffer(&buffer);
+                next = (next + 1) % slots;
+            }
+            else
+                WaitForSingleObject(stop, 5);
+        }
+        if (voice) voice->DestroyVoice();
+        if (master) master->DestroyVoice();
+        if (engine) engine->Release();
+        free(storage);
+        return hr;
     }
 
     class PlaybackLog
@@ -572,6 +755,8 @@ namespace
         }
         const HRESULT discStatus = frame.DecodeMpeg2(device);
         const bool discPlayback = discStatus == S_OK;
+        CdAudioPlayer cdAudio;
+        const bool cdPlayback = !discPlayback && cdAudio.Start();
         bool showFrame = discPlayback;
         bool compressed = discPlayback;
         BootLog(discPlayback ? "DVD First Play stream primed" : "DVD First Play startup failed", discStatus);
@@ -600,6 +785,7 @@ namespace
         }
 #endif
         static PlaybackOsd osd;
+        osd.ResetCdFocus();
         unsigned subtitleCount = frame.SubtitleCount();
         const HRESULT osdStatus = osd.Open(device);
         bool osdReady = false;
@@ -647,7 +833,7 @@ namespace
         HRESULT audioStartStatus = S_OK;
         bool switchingAudio = false;
         // XAM's disc-change broadcast carries zero when media is removed.
-        bool noDisc = !discPlayback;
+        bool noDisc = !discPlayback && !cdPlayback;
         const LONGLONG discProbeInterval = 2 * frequency.QuadPart;
         LONGLONG nextDiscProbe = previous.QuadPart + discProbeInterval;
         // Keep removal detection responsive without opening the drive on
@@ -693,6 +879,7 @@ namespace
                 noDisc = true;
                 playbackEnded = capture;
                 showFrame = switchingAudio = embeddedAudio = false;
+                cdAudio.Stop();
                 frame.Stop();
                 animation.Center();
                 if (!osdReady)
@@ -710,6 +897,11 @@ namespace
             {
                 const HRESULT status = frame.DecodeMpeg2(device);
                 BootLog("DVD idle probe: opening First Play", status);
+                if (status != S_OK && cdAudio.Start())
+                {
+                    noDisc = false;
+                    osd.ResetCdFocus();
+                }
                 QueryPerformanceCounter(&previous);
                 nextDiscProbe = previous.QuadPart + discProbeInterval;
                 if (status == S_OK)
@@ -729,6 +921,13 @@ namespace
                     nextRemovalCheck = previous.QuadPart + removalCheckInterval;
                     playbackLog.Open();
                 }
+            }
+            if (cdAudio.HasDisc())
+            {
+                const PlaybackOsd::Action action = osd.UpdateCd();
+                if (action == PlaybackOsd::TogglePause) cdAudio.TogglePause();
+                if (action == PlaybackOsd::PreviousChapter) cdAudio.Skip(-1);
+                if (action == PlaybackOsd::NextChapter) cdAudio.Skip(1);
             }
             if (switchingAudio)
             {
@@ -890,6 +1089,8 @@ namespace
                 device->EndScene();
                 if (osdReady && noDisc)
                     osd.DrawNoDisc();
+                else if (osdReady && cdAudio.HasDisc())
+                    osd.DrawCd(cdAudio.Paused(), elapsed);
                 else if (osdReady && showFrame && capture && !playbackEnded)
                     osd.DrawStock(paused, elapsed, playbackSeconds, playbackDuration,
                                    frame.TrackLanguage(false),

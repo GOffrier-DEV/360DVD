@@ -20,6 +20,16 @@ public:
     int Read(void* buffer, int byteCount);
     LONG LastStatus() const { return m_status; }
     static bool DriveReportsNoMedia();
+    struct CdAudioProbe
+    {
+        const char* stage;
+        unsigned tocBytes, tocLength, tocFirst, tocLast;
+        unsigned firstTrack, startLba, endLba, audioTracks, dataTracks;
+        unsigned bytesRead;
+        struct Track { unsigned start, end; } tracks[99];
+    };
+    HRESULT ProbeCdAudio(CdAudioProbe& probe);
+    HRESULT ReadCdAudio(unsigned lba, unsigned sectors, void* pcm, unsigned& bytesRead);
     // The stream must outlive the reader returned by DVDOpenStream.
     static dvd_reader_stream_cb* ReaderCallbacks();
     static dvd_reader_stream_cb* ReaderAuthCallbacks();

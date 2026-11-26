@@ -3,7 +3,7 @@
 DVD player for modded Xbox 360 consoles (RGH/JTAG).
 
 360DVD uses `libdvdread` for disc access, `libdvdnav` for navigation, FFmpeg
-for decoding, and XAudio2 for audio output. CD playback is out of scope.
+for DVD decoding, and XAudio2 for both DVD and audio CD output.
 
 ## Current status
 
@@ -18,11 +18,13 @@ plays DVD video, audio, and subtitles with the native Blades overlay.
   through XAudio2, with live audio-track switching.
 - DVD subtitle streams, six display modes, and a stock-style zoom toggle.
 - Previous/next chapter controls and 10-second backward/forward DVD seeks.
+- Audio CD playback with compact Blades Previous Track, Play/Pause, and Next
+  Track controls. Use the D-pad to select and **A** to activate.
 - The Blades scenes, icons, font, and DVD-Video logo are embedded in the XEX,
   so only the XEX needs to be deployed.
 
 Seek skips are limited to the current DVD PGC and unavailable in menus or still
-frames. Resume bookmarks and CD playback are not implemented. Xenon IDCT is
+frames. Resume bookmarks are not implemented. Xenon IDCT is
 used for video; motion compensation remains scalar. See
 [CHANGELOG.md](CHANGELOG.md) for release notes.
 

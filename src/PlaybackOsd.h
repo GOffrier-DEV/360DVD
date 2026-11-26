@@ -10,7 +10,8 @@ public:
     enum { SceneWidth = 720, SceneHeight = 480 };
     enum Action { None, TogglePause, DisplayMode, SubtitleTrack, ToggleZoom, NextAudioTrack,
                   Stop, PreviousChapter, NextChapter, SeekBackward, SeekForward,
-                  DiscUp, DiscDown, DiscLeft, DiscRight, DiscActivate, DiscRoot, DiscTitle, DiscContinue };
+                  DiscUp, DiscDown, DiscLeft, DiscRight, DiscActivate, DiscRoot, DiscTitle, DiscContinue,
+                  RipDisc, CancelRip };
     enum { DisplayModeCount = 6 };
     enum { StockZoomMode = DisplayModeCount };
     PlaybackOsd();
@@ -30,6 +31,7 @@ public:
     Action UpdateCd();
     void DrawCd(bool paused, double elapsed);
     void ResetCdFocus();
+    void SetCdRipStatus(const char* status);
     bool Ready() const { return m_decl != NULL; }
     void DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                     unsigned width, unsigned height, const BYTE* pixels, int pitch,

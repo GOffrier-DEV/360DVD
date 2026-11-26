@@ -40,10 +40,23 @@ static int32_t last_error;
 unsigned dvd360_css_verified_sessions(void) { return verified_sessions; }
 int32_t dvd360_css_last_error(void) { return last_error; }
 
+#ifdef DVD360_LOGGING
+uint32_t GetTickCount(void);
+void dvd360_log_css_timing(uint32_t code, uint32_t format, uint32_t ms, int32_t status);
+#endif
+
 static int control(int fd, uint32_t code, void *in, uint32_t inlen,
                    void *out, uint32_t outlen, uint32_t required)
 {
     DvdIoStatus io = {0};
+#ifdef DVD360_LOGGING
+    uint32_t format = 0;
+    if (code == ReadKey || code == SendKey)
+        format = ((const DvdKeyRequest *)in)->format;
+    else if (code == ReadStructure)
+        format = ((const DvdStructureRequest *)in)->format;
+    const uint32_t start = GetTickCount();
+#endif
     int32_t status = NtDeviceIoControlFile((void *)(uintptr_t)(uint32_t)fd,
         NULL, NULL, NULL, &io, code, in, inlen, out, outlen);
     if (status == 0)
@@ -52,6 +65,9 @@ static int control(int fd, uint32_t code, void *in, uint32_t inlen,
         status = (int32_t)0xC000009C;
     if (status != 0)
         last_error = status;
+#ifdef DVD360_LOGGING
+    dvd360_log_css_timing(code, format, GetTickCount() - start, status);
+#endif
     return status == 0 ? 0 : -1;
 }
 

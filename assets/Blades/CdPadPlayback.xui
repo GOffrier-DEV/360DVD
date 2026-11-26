@@ -58,5 +58,12 @@
 <ImagePath>dvd360:///wmp11-next.png</ImagePath>
 </Properties>
 </XuiImage>
+<XuiLabel>
+<Properties>
+<Id>txt_Rip</Id><Width>680.000000</Width><Height>29.000000</Height>
+<Position>20.000000,447.000000,0.000000</Position>
+<Visual>dvd_Label_NoDisc</Visual><Text>Y: Rip Disc to WAV</Text>
+</Properties>
+</XuiLabel>
 </XuiScene>
 </XuiCanvas>

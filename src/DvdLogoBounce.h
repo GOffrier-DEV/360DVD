@@ -12,6 +12,7 @@ public:
     bool Startup(IDirect3DDevice9* device, int screenWidth, int screenHeight);
     void Update(float elapsedSeconds);
     void Render(bool noDisc = false);
+    void RenderNoDisc();
     void Center();
     void Shutdown();
 

@@ -722,6 +722,9 @@ HRESULT DvdFrameProbe::Consume(IDirect3DDevice9* device, DWORD timeout, bool aud
 
 HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device)
 {
+#ifdef DVD360_LOGGING
+    const DWORD startupStart = GetTickCount();
+#endif
     for (unsigned set = 0; set < 3; ++set)
         for (unsigned i = 0; i < 3; ++i)
             if (m_planes[set][i])
@@ -763,6 +766,12 @@ HRESULT DvdFrameProbe::DecodeMpeg2(IDirect3DDevice9* device)
         if (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
             hr = Consume(device, 0);
     }
+#ifdef DVD360_LOGGING
+    char startupTiming[128];
+    sprintf_s(startupTiming, sizeof(startupTiming), "DVD startup through first frame: %lu ms (status=0x%08X)",
+              GetTickCount() - startupStart, static_cast<unsigned>(hr));
+    LogDvdNavStartup(startupTiming);
+#endif
     if (hr != S_OK)
         CloseDecoder();
     return hr == S_FALSE ? E_FAIL : hr;
@@ -897,19 +906,52 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
     if (!d.codec)
     {
         HRESULT inputStatus = E_FAIL;
+#ifdef DVD360_LOGGING
+        const DWORD navStart = GetTickCount();
+        const bool openingDisc = !d.io;
+#endif
         if (!d.io)
             d.io = CreateFfmpegDiscIo(&d.ioStats, inputStatus);
+#ifdef DVD360_LOGGING
+        const DWORD navMs = openingDisc ? GetTickCount() - navStart : 0;
+#endif
         if (!d.io) return inputStatus;
         d.format = d.io ? avformat_alloc_context() : NULL;
         if (!d.format)
             return E_OUTOFMEMORY;
         d.format->pb = d.io;
         d.format->flags |= AVFMT_FLAG_CUSTOM_IO;
-         LogDvdNavStartup("Opening FFmpeg MPEG program stream");
+        LogDvdNavStartup("Opening FFmpeg MPEG program stream");
         const AVInputFormat* inputFormat = av_find_input_format("mpeg");
+#ifdef DVD360_LOGGING
+        const auto beforeOpen = d.ioStats;
+        const DWORD openStart = GetTickCount();
+#endif
         const int opened = avformat_open_input(&d.format, NULL, inputFormat, NULL);
+#ifdef DVD360_LOGGING
+        const DWORD openMs = GetTickCount() - openStart;
+        char openTiming[128];
+        sprintf_s(openTiming, sizeof(openTiming), "MPEG open input: reads=%u bytes=%u AVIO wait=%.1f ms",
+                  static_cast<unsigned>(d.ioStats.calls - beforeOpen.calls),
+                  static_cast<unsigned>(d.ioStats.bytes - beforeOpen.bytes),
+                  m_parseFrequency ? (d.ioStats.ticks - beforeOpen.ticks) * 1000.0 / m_parseFrequency : 0.0);
+        LogDvdNavStartup(openTiming);
+#endif
         if (opened >= 0) LogDvdNavStartup("Probing FFmpeg streams");
+#ifdef DVD360_LOGGING
+        const auto beforeProbe = d.ioStats;
+        const DWORD probeStart = GetTickCount();
+#endif
         const int probed = opened < 0 ? opened : avformat_find_stream_info(d.format, NULL);
+#ifdef DVD360_LOGGING
+        const DWORD probeMs = opened < 0 ? 0 : GetTickCount() - probeStart;
+        char timing[224];
+        sprintf_s(timing, sizeof(timing),
+                  "DVD startup stages: nav open=%lu ms MPEG open=%lu ms stream probe=%lu ms probe reads=%u bytes=%u result=%d",
+                  navMs, openMs, probeMs, static_cast<unsigned>(d.ioStats.calls - beforeProbe.calls),
+                  static_cast<unsigned>(d.ioStats.bytes - beforeProbe.bytes), probed);
+        LogDvdNavStartup(timing);
+#endif
         const AVCodec* codec = NULL;
         d.video = probed < 0 ? -1 :
             av_find_best_stream(d.format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
@@ -923,7 +965,7 @@ HRESULT DvdFrameProbe::NextFrame(QueuedFrame& frame)
             }
             return probed < 0 ? E_FAIL : E_INVALIDARG;
         }
-         LogDvdNavStartup("FFmpeg stream probe complete");
+        LogDvdNavStartup("FFmpeg stream probe complete");
         d.codec = avcodec_alloc_context3(codec);
         d.decoded = av_frame_alloc();
         d.packet = av_packet_alloc();

@@ -20,6 +20,13 @@ plays DVD video, audio, and subtitles with the native Blades overlay.
 - Previous/next chapter controls and 10-second backward/forward DVD seeks.
 - Audio CD playback with compact Blades Previous Track, Play/Pause, and Next
   Track controls. Use the D-pad to select and **A** to activate.
+- On the audio CD screen, press **Y** to rip one 44.1 kHz, 16-bit stereo WAV per
+  track to `Hdd:\360DVD-Rips`. Press **B** to cancel; completed tracks are kept.
+  The rip folder's `rip.txt` records online AccurateRip results and track
+  checksums. WAV export still works when the database is unavailable.
+  To apply your drive's AccurateRip correction offset, put the signed sample
+  count (for example `+6`) in `Hdd:\360DVD-Rips\drive-offset.txt`. Without the
+  file, the offset is zero. Online verification currently covers audio-only CDs.
 - The Blades scenes, icons, font, and DVD-Video logo are embedded in the XEX,
   so only the XEX needs to be deployed.
 

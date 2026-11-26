@@ -26,7 +26,7 @@ public:
         unsigned tocBytes, tocLength, tocFirst, tocLast;
         unsigned firstTrack, startLba, endLba, audioTracks, dataTracks;
         unsigned bytesRead;
-        struct Track { unsigned start, end; } tracks[99];
+        struct Track { unsigned start, end, number; } tracks[99];
     };
     HRESULT ProbeCdAudio(CdAudioProbe& probe);
     HRESULT ReadCdAudio(unsigned lba, unsigned sectors, void* pcm, unsigned& bytesRead);
@@ -45,6 +45,13 @@ private:
     DWORD m_readLimit;
     unsigned long long m_position;
     LONG m_status;
+#ifdef DVD360_LOGGING
+    bool m_firstOpticalRead = true;
+    unsigned m_opticalReadCalls = 0;
+    unsigned long long m_opticalReadBytes = 0;
+    unsigned long long m_opticalReadTotalMs = 0;
+    DWORD m_opticalReadWorstMs = 0;
+#endif
 };
 
 #endif

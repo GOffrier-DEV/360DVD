@@ -7,6 +7,7 @@
 
 #include "DvdLogoBounce.h"
 #include "CdDiscScene.h"
+#include "CdRip.h"
 #include "DvdFrameProbe.h"
 #include "PlaybackAffinity.h"
 #include "PlaybackOsd.h"
@@ -23,9 +24,11 @@ extern "C" int32_t dvd360_css_last_error();
 
 namespace
 {
-    void BootLog(const char* message, HRESULT result = S_OK)
+    void BootLog(const char* message, HRESULT result = S_OK, bool logInRelease = false)
     {
-#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
+#if !defined(DVD360_LOGGING) && !defined(DVD360_PERF_LOGGING)
+        if (!logInRelease) return;
+#endif
         char line[320];
         sprintf_s(line, sizeof(line), "%s (status=0x%08X)\r\n",
                   message, (unsigned int)result);
@@ -45,7 +48,6 @@ namespace
             FlushFileBuffers(file);
             CloseHandle(file);
         }
-#endif
     }
 
     // XAM normally responds to an optical-tray removal by launching its
@@ -207,31 +209,85 @@ namespace
 
         bool Start();
         bool HasDisc() const { return thread != NULL; }
+        bool WorkerExited() const
+        {
+            return thread && WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
+        }
         bool Paused() { return InterlockedCompareExchange(&paused, 0, 0) != 0; }
         void TogglePause() { InterlockedExchange(&paused, Paused() ? 0 : 1); }
         void Skip(LONG direction) { InterlockedExchange(&skip, direction); }
+        bool Ripping()
+        {
+            const LONG state = InterlockedCompareExchange(&ripState, Idle, Idle);
+            return state == Requested || state == RippingDisc;
+        }
+        bool RequestRip()
+        {
+            if (!ripCancel || Ripping()) return false;
+            ResetEvent(ripCancel);
+            InterlockedExchange(&ripProgress, CdRipPreparing);
+            return InterlockedCompareExchange(&ripState, Requested, Idle) == Idle;
+        }
+        LONG RipProgress() { return InterlockedCompareExchange(&ripProgress, 0, 0); }
+        const char* TakeConnectionResult()
+        {
+            if (!connectionThread || WaitForSingleObject(connectionThread, 0) != WAIT_OBJECT_0)
+                return NULL;
+            CloseHandle(connectionThread);
+            connectionThread = NULL;
+            return connectionResult;
+        }
+        void CancelRip() { if (ripCancel && Ripping()) SetEvent(ripCancel); }
+        const char* TakeRipResult()
+        {
+            return InterlockedCompareExchange(&ripState, Idle, Finished) == Finished ? ripResult : NULL;
+        }
         void Stop()
         {
             if (!thread) return;
             SetEvent(stop);
             WaitForSingleObject(thread, INFINITE);
+            if (connectionThread)
+            {
+                WaitForSingleObject(connectionThread, INFINITE);
+                CloseHandle(connectionThread);
+                connectionThread = NULL;
+            }
             CloseHandle(thread);
             CloseHandle(stop);
-            thread = stop = NULL;
+            CloseHandle(ripCancel);
+            if (connectionDone) CloseHandle(connectionDone);
+            connectionDone = NULL;
+            thread = stop = ripCancel = NULL;
         }
 
     private:
+        static DWORD WINAPI CheckConnection(void* context)
+        {
+            CdAudioPlayer& player = *static_cast<CdAudioPlayer*>(context);
+            ProbeAccurateRipConnection(player.stop, player.connectionResult);
+            SetEvent(player.connectionDone);
+            return 0;
+        }
         static DWORD WINAPI Run(void* context)
         {
             CdAudioPlayer& player = *static_cast<CdAudioPlayer*>(context);
             const HRESULT status = player.Play();
             BootLog(status == S_OK ? "CD audio finished" :
-                    status == S_FALSE ? "CD audio stopped" : "CD audio playback failed", status);
+                    status == S_FALSE ? "CD audio stopped" : "CD audio playback failed", status, FAILED(status));
             return 0;
         }
         HRESULT Play();
         HANDLE stop = NULL;
         HANDLE thread = NULL;
+        HANDLE ripCancel = NULL;
+        HANDLE connectionThread = NULL;
+        HANDLE connectionDone = NULL;
+        char connectionResult[96] = {};
+        enum { Idle, Requested, RippingDisc, Finished };
+        volatile LONG ripState = Idle;
+        volatile LONG ripProgress = CdRipPreparing;
+        char ripResult[96] = {};
         volatile LONG paused = 0;
         volatile LONG skip = 0;
         XboxDvdStream::CdAudioProbe probe = {};
@@ -247,15 +303,27 @@ namespace
                   probe.stage, probe.tocBytes, probe.tocLength, probe.tocFirst, probe.tocLast,
                   probe.audioTracks, probe.dataTracks, probe.firstTrack,
                   probe.startLba, probe.endLba, probe.bytesRead);
-        BootLog(line, status);
+        BootLog(line, status, status == S_OK || probe.audioTracks != 0);
         if (status != S_OK) return false;
         InterlockedExchange(&paused, 0);
         InterlockedExchange(&skip, 0);
         stop = CreateEvent(NULL, TRUE, FALSE, NULL);
-        if (stop) thread = CreateThread(NULL, 0, Run, this, 0, NULL);
-        if (thread) return true;
+        ripCancel = CreateEvent(NULL, TRUE, FALSE, NULL);
+        InterlockedExchange(&ripState, Idle);
+        if (stop && ripCancel) thread = CreateThread(NULL, 0, Run, this, 0, NULL);
+        if (thread)
+        {
+            connectionDone = CreateEvent(NULL, TRUE, FALSE, NULL);
+            if (connectionDone)
+            {
+                connectionThread = CreateThread(NULL, 0, CheckConnection, this, 0, NULL);
+                if (!connectionThread) SetEvent(connectionDone);
+            }
+            return true;
+        }
         if (stop) CloseHandle(stop);
-        stop = NULL;
+        if (ripCancel) CloseHandle(ripCancel);
+        stop = ripCancel = NULL;
         BootLog("CD audio worker could not start", E_FAIL);
         return false;
     }
@@ -264,7 +332,12 @@ namespace
     __attribute__((optnone)) HRESULT CdAudioPlayer::Play()
     {
         XboxDvdStream stream;
-        if (!stream.Open()) return HRESULT_FROM_NT(stream.LastStatus());
+        if (!stream.Open())
+        {
+            const HRESULT status = HRESULT_FROM_NT(stream.LastStatus());
+            BootLog("CD audio: worker optical open failed", status, true);
+            return status;
+        }
         IXAudio2* engine = NULL;
         IXAudio2MasteringVoice* master = NULL;
         IXAudio2SourceVoice* voice = NULL;
@@ -278,6 +351,7 @@ namespace
         format.nBlockAlign = 4;
         format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
         if (SUCCEEDED(hr)) hr = engine->CreateSourceVoice(&voice, &format);
+        if (FAILED(hr)) BootLog("CD audio: XAudio2 initialization failed", hr, true);
         const unsigned slots = 4, batch = 12, sectorBytes = 2352;
         BYTE* storage = static_cast<BYTE*>(malloc(slots * batch * sectorBytes + 15));
         if (!storage && SUCCEEDED(hr)) hr = E_OUTOFMEMORY;
@@ -297,6 +371,25 @@ namespace
             {
                 hr = S_FALSE;
                 break;
+            }
+            if (InterlockedCompareExchange(&ripState, RippingDisc, Requested) == Requested)
+            {
+                voice->Stop();
+                voice->FlushSourceBuffers();
+                started = false;
+                next = restartAttempts = track = 0;
+                lba = probe.tracks[0].start;
+                InterlockedExchange(&paused, 1);
+                InterlockedExchange(&skip, 0);
+                if (connectionDone)
+                {
+                    HANDLE events[] = {stop, ripCancel, connectionDone};
+                    WaitForMultipleObjects(ARRAYSIZE(events), events, FALSE, INFINITE);
+                }
+                const HRESULT result = RipAudioCd(stream, probe, stop, ripCancel, ripProgress, ripResult);
+                BootLog(ripResult, result, true);
+                InterlockedExchange(&ripState, Finished);
+                continue;
             }
             const LONG jump = InterlockedExchange(&skip, 0);
             if (jump)
@@ -330,7 +423,7 @@ namespace
                 lastProgress = GetTickCount();
                 if (!loggedStart)
                 {
-                    BootLog("CD audio: XAudio2 started (byte-swapped PCM)");
+                    BootLog("CD audio: XAudio2 started (byte-swapped PCM)", S_OK, true);
                     loggedStart = true;
                 }
             }
@@ -347,7 +440,7 @@ namespace
                 // Like the DVD voice, recover when queued PCM stops advancing.
                 hr = voice->Stop();
                 if (SUCCEEDED(hr)) hr = voice->Start();
-                BootLog("CD audio: restarting stalled XAudio2 voice", hr);
+                BootLog("CD audio: restarting stalled XAudio2 voice", hr, true);
                 if (FAILED(hr)) break;
                 ++restartAttempts;
                 lastProgress = now;
@@ -380,7 +473,14 @@ namespace
                 unsigned bytes = 0;
                 BYTE* pcm = buffers + next * batch * sectorBytes;
                 hr = stream.ReadCdAudio(lba, sectors, pcm, bytes);
-                if (FAILED(hr)) break;
+                if (FAILED(hr))
+                {
+                    char message[96];
+                    sprintf_s(message, sizeof(message), "CD audio: raw read failed at LBA %u (%u sectors)",
+                              lba, sectors);
+                    BootLog(message, hr, true);
+                    break;
+                }
                 // The drive's CDDA samples need a byte swap for XAudio2 PCM.
                 for (unsigned i = 0; i < bytes; i += 2)
                 {
@@ -843,6 +943,7 @@ namespace
         const DWORD discMediaChanged = 0x8000000D;
         const HANDLE discListener = XNotifyCreateListener(XNOTIFY_SYSTEM);
         BootLog("Opening optical DVD at First Play");
+        const DWORD firstPlayStart = GetTickCount();
         device->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
         if (SUCCEEDED(device->BeginScene()))
         {
@@ -850,6 +951,10 @@ namespace
             device->Present(NULL, NULL, NULL, NULL);
         }
         const HRESULT discStatus = frame.DecodeMpeg2(device);
+        char firstPlayTiming[112];
+        sprintf_s(firstPlayTiming, sizeof(firstPlayTiming), "First Play attempt completed: %lu ms",
+                  GetTickCount() - firstPlayStart);
+        BootLog(firstPlayTiming, discStatus);
         const bool discPlayback = discStatus == S_OK;
         CdAudioPlayer cdAudio;
         CdDiscScene cdScene;
@@ -909,7 +1014,6 @@ namespace
         double playbackSeconds = 0;
         double playbackDuration = frame.DurationSeconds();
         unsigned discSegment = frame.DiscSegment();
-        bool deinterlaceNotified = false;
         LARGE_INTEGER frequency;
         LARGE_INTEGER previous;
         QueryPerformanceFrequency(&frequency);
@@ -931,6 +1035,9 @@ namespace
         bool switchingAudio = false;
         // XAM's disc-change broadcast carries zero when media is removed.
         bool noDisc = !discPlayback && !cdPlayback;
+        LONG displayedRipProgress = 0;
+        const LONGLONG screensaverDelay = 5 * 60 * frequency.QuadPart;
+        LONGLONG noDiscSince = previous.QuadPart;
         const LONGLONG discProbeInterval = 2 * frequency.QuadPart;
         LONGLONG nextDiscProbe = previous.QuadPart + discProbeInterval;
         // Keep removal detection responsive without opening the drive on
@@ -971,9 +1078,11 @@ namespace
                 QueryPerformanceCounter(&checked);
                 nextRemovalCheck = checked.QuadPart + removalCheckInterval;
             }
-            if (!noDisc && mediaRemoved)
+            const bool cdWorkerExited = cdAudio.WorkerExited();
+            if (!noDisc && (mediaRemoved || cdWorkerExited))
             {
                 noDisc = true;
+                noDiscSince = now.QuadPart;
                 playbackEnded = capture;
                 showFrame = switchingAudio = embeddedAudio = false;
                 cdAudio.Stop();
@@ -986,20 +1095,28 @@ namespace
                     osdReady = SUCCEEDED(osd.OpenStock(device, &present, stage));
                 }
                 if (osdReady) osd.ShowNoDisc();
-                BootLog("DVD media removed");
+                BootLog(mediaRemoved ? "Optical media removed" : "CD worker exited; retrying media detection");
                 nextDiscProbe = now.QuadPart + discProbeInterval;
             }
             // A tray close does not always deliver a usable insertion event.
             // Retry only while idle, with a delay between completed attempts.
             if (noDisc && !playbackEnded && now.QuadPart >= nextDiscProbe)
             {
+                const DWORD attemptStart = GetTickCount();
+                BootLog("DVD idle probe: First Play attempt starting");
                 const HRESULT status = frame.DecodeMpeg2(device);
+                char attemptTiming[112];
+                sprintf_s(attemptTiming, sizeof(attemptTiming), "DVD idle probe attempt duration: %lu ms",
+                          GetTickCount() - attemptStart);
+                BootLog(attemptTiming, status);
                 BootLog("DVD idle probe: opening First Play", status);
                 if (status != S_OK && cdAudio.Start())
                 {
                     noDisc = false;
                     osd.ResetCdFocus();
                 }
+                if (status == S_OK || cdAudio.HasDisc())
+                    noDisc = false;
                 QueryPerformanceCounter(&previous);
                 nextDiscProbe = previous.QuadPart + discProbeInterval;
                 if (status == S_OK)
@@ -1011,7 +1128,6 @@ namespace
                     discSegment = frame.DiscSegment();
                     subtitle = 0;
                     subtitleCount = frame.SubtitleCount();
-                    deinterlaceNotified = false;
                     presentedFrames = lastPresented = missedFrames = 0;
                     traceCount = traceOmitted = 0;
                     presentTicks = 0;
@@ -1022,10 +1138,44 @@ namespace
             }
             if (cdAudio.HasDisc())
             {
+                if (const char* connection = cdAudio.TakeConnectionResult())
+                {
+                    BootLog(connection, S_OK, true);
+                    if (!cdAudio.Ripping()) osd.SetCdRipStatus(connection);
+                }
+                if (const char* result = cdAudio.TakeRipResult())
+                    osd.SetCdRipStatus(result);
                 const PlaybackOsd::Action action = osd.UpdateCd();
-                if (action == PlaybackOsd::TogglePause) cdAudio.TogglePause();
-                if (action == PlaybackOsd::PreviousChapter) cdAudio.Skip(-1);
-                if (action == PlaybackOsd::NextChapter) cdAudio.Skip(1);
+                if (action == PlaybackOsd::CancelRip) cdAudio.CancelRip();
+                if (action == PlaybackOsd::RipDisc && cdAudio.RequestRip())
+                {
+                    displayedRipProgress = CdRipPreparing;
+                    osd.SetCdRipStatus("Preparing WAV export to HDD   B: Cancel");
+                }
+                if (cdAudio.Ripping())
+                {
+                    const LONG progress = cdAudio.RipProgress();
+                    if (progress != displayedRipProgress)
+                    {
+                        displayedRipProgress = progress;
+                        char text[96];
+                        if (progress == CdRipVerifying)
+                            osd.SetCdRipStatus("WAVs saved   Checking AccurateRip online   B: Cancel");
+                        else if (progress >= 0)
+                        {
+                            sprintf_s(text, sizeof(text), "WAV Track %02u: %u%%   Disc: %u%%   B: Cancel",
+                                      unsigned(progress) >> 16, (unsigned(progress) >> 8) & 255,
+                                      unsigned(progress) & 255);
+                            osd.SetCdRipStatus(text);
+                        }
+                    }
+                }
+                else
+                {
+                    if (action == PlaybackOsd::TogglePause) cdAudio.TogglePause();
+                    if (action == PlaybackOsd::PreviousChapter) cdAudio.Skip(-1);
+                    if (action == PlaybackOsd::NextChapter) cdAudio.Skip(1);
+                }
             }
             if (switchingAudio)
             {
@@ -1065,7 +1215,12 @@ namespace
                 {
                     userStopped = playbackEnded = true;
                     showFrame = false;
+                    noDisc = true;
+                    noDiscSince = now.QuadPart;
+                    animation.Center();
                     frame.Stop();
+                    if (osdReady) osd.ShowNoDisc();
+                    nextDiscProbe = now.QuadPart + discProbeInterval;
                 }
                 else if (action == PlaybackOsd::PreviousChapter)
                     frame.DiscMenuInput(DvdMenuPreviousChapter);
@@ -1117,7 +1272,6 @@ namespace
                 if (discSegment != frame.DiscSegment())
                 {
                     discSegment = frame.DiscSegment();
-                    deinterlaceNotified = false;
                     playbackSeconds = 0;
                     playbackDuration = frame.DurationSeconds();
                     subtitleCount = frame.SubtitleCount();
@@ -1146,6 +1300,7 @@ namespace
                     // instead of) XAM's media-change notification. Keep the
                     // title alive and use the normal idle re-probe path.
                     noDisc = true;
+                    noDiscSince = now.QuadPart;
                     playbackEnded = capture;
                     showFrame = false;
                     switchingAudio = embeddedAudio = false;
@@ -1156,16 +1311,11 @@ namespace
                     nextDiscProbe = now.QuadPart + discProbeInterval;
                 }
             }
-            if (osdReady && showFrame && capture && !playbackEnded &&
-                !deinterlaceNotified && frame.DeinterlacingActive())
-            {
-                osd.ShowDeinterlacePopup();
-                BootLog("Interlaced video detected; FFmpeg bwdif active");
-                deinterlaceNotified = true;
-            }
             LARGE_INTEGER advanceEnd;
             QueryPerformanceCounter(&advanceEnd);
-            if (!noDisc) animation.Update(elapsed);
+            const bool screensaver = noDisc &&
+                now.QuadPart - noDiscSince >= screensaverDelay;
+            if (screensaver) animation.Update(elapsed);
             device->Clear(0, NULL, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
             bool drewVideo = false;
             if (SUCCEEDED(device->BeginScene()))
@@ -1184,7 +1334,11 @@ namespace
                 }
                 else if (!cdAudio.HasDisc() ||
                          !cdScene.Draw(device, !cdAudio.Paused(), elapsed))
-                    animation.Render(noDisc);
+                {
+                    if (noDisc && screensaver) animation.Render(false);
+                    else if (noDisc) animation.RenderNoDisc();
+                    else animation.Render(false);
+                }
                 device->EndScene();
                 if (osdReady && noDisc)
                     osd.DrawNoDisc();

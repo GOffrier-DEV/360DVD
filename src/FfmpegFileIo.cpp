@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 extern "C" {
 #include <dvdnav/dvdnav.h>
@@ -52,10 +53,15 @@ void LogDvdNavStartup(const char* message, bool reset)
 
 namespace
 {
-#ifndef DVD360_LOGGING
-    void SilentDvdLog(void*, dvdnav_logger_level_t, const char*, va_list) {}
-    const dvdnav_logger_cb silentDvdLogger = { SilentDvdLog };
+    void DvdNavLog(void*, dvdnav_logger_level_t, const char* format, va_list args)
+    {
+#ifdef DVD360_LOGGING
+        char message[224];
+        if (vsnprintf(message, sizeof(message), format, args) >= 0)
+            LogDvdNavStartup(message);
 #endif
+    }
+    const dvdnav_logger_cb dvdNavLogger = { DvdNavLog };
     enum { ChunkSize = 128 * 1024, ChunkCount = 4 };
 
     struct FileInput
@@ -165,21 +171,30 @@ namespace
     HRESULT OpenDisc(FileInput& input)
     {
         LogDvdNavStartup("Opening Xbox optical transport", true);
+        const DWORD transportStart = GetTickCount();
         input.disc = new XboxDvdStream();
         if (!input.disc) return E_OUTOFMEMORY;
         if (!input.disc->Open())
             return HRESULT_FROM_NT(input.disc->LastStatus());
+        char timing[128];
+        sprintf_s(timing, sizeof(timing), "Xbox optical transport open: %lu ms",
+                  GetTickCount() - transportStart);
+        LogDvdNavStartup(timing);
         LogDvdNavStartup("Opening libdvdnav VM");
-#ifdef DVD360_LOGGING
-        const dvdnav_status_t opened = dvdnav_open_stream(&input.nav, input.disc, input.disc->ReaderAuthCallbacks());
-#else
-        const dvdnav_status_t opened = dvdnav_open_stream2(&input.nav, input.disc, &silentDvdLogger,
+        const DWORD navStart = GetTickCount();
+        const dvdnav_status_t opened = dvdnav_open_stream2(&input.nav, input.disc, &dvdNavLogger,
                                                           input.disc->ReaderAuthCallbacks());
-#endif
+        sprintf_s(timing, sizeof(timing), "libdvdnav VM open: %lu ms result=%d",
+                  GetTickCount() - navStart, static_cast<int>(opened));
+        LogDvdNavStartup(timing);
         if (opened != DVDNAV_STATUS_OK)
         {
-            LogDvdNavStartup("libdvdnav open failed");
-            return E_FAIL;
+            const LONG status = input.disc->LastStatus();
+            char message[96];
+            sprintf_s(message, sizeof(message), "libdvdnav open failed (last optical status=0x%08X)",
+                      static_cast<unsigned>(status));
+            LogDvdNavStartup(message);
+            return status < 0 ? HRESULT_FROM_NT(status) : E_FAIL;
         }
         dvdnav_set_readahead_flag(input.nav, 1);
         LogDvdNavStartup("libdvdnav VM open");
@@ -193,8 +208,21 @@ namespace
         {
             uint8_t* sector = buffer + received;
             int32_t event = 0, length = 0;
-            if (dvdnav_get_next_block(input.nav, sector, &event, &length) != DVDNAV_STATUS_OK)
+            const DWORD readStart = GetTickCount();
+            const dvdnav_status_t nextStatus = dvdnav_get_next_block(input.nav, sector, &event, &length);
+            const DWORD readMs = GetTickCount() - readStart;
+            if (readMs >= 500)
             {
+                char timing[112];
+                sprintf_s(timing, sizeof(timing), "dvdnav_get_next_block: %lu ms event=%d length=%d",
+                          readMs, event, length);
+                LogDvdNavStartup(timing);
+            }
+            if (nextStatus != DVDNAV_STATUS_OK)
+            {
+                char timing[96];
+                sprintf_s(timing, sizeof(timing), "dvdnav_get_next_block failed after %lu ms", readMs);
+                LogDvdNavStartup(timing);
                 LogDvdNavStartup(dvdnav_err_to_string(input.nav));
                 input.navTerminal = AVERROR(EIO);
             }
@@ -272,7 +300,10 @@ namespace
                 {
                     if (!input.navFirstBlock)
                     {
-                        LogDvdNavStartup("First DVD block received");
+                        char timing[96];
+                        sprintf_s(timing, sizeof(timing), "First DVD block received after %lu ms",
+                                  GetTickCount() - readStart);
+                        LogDvdNavStartup(timing);
                         input.navFirstBlock = true;
                     }
                     received += length;
@@ -438,7 +469,16 @@ namespace
             if (input.count == ChunkCount || input.terminal)
             {
                 LeaveCriticalSection(&input.lock);
+                const DWORD waitStart = GetTickCount();
                 WaitForSingleObject(input.spaceReady, INFINITE);
+                const DWORD waitMs = GetTickCount() - waitStart;
+                if (waitMs >= 500)
+                {
+                    char timing[96];
+                    sprintf_s(timing, sizeof(timing), "Read-ahead buffer full: waited %lu ms",
+                              waitMs);
+                    LogDvdNavStartup(timing);
+                }
                 continue;
             }
             const unsigned slot = (input.head + input.count) % ChunkCount;
@@ -446,9 +486,11 @@ namespace
 
             LARGE_INTEGER start, end;
             DWORD received = 0;
+            const DWORD wallStart = GetTickCount();
             QueryPerformanceCounter(&start);
             ReadDisc(input, input.bytes + slot * ChunkSize, received);
             QueryPerformanceCounter(&end);
+            const DWORD wallMs = GetTickCount() - wallStart;
 
             EnterCriticalSection(&input.lock);
             const LONGLONG ticks = end.QuadPart - start.QuadPart;
@@ -456,6 +498,14 @@ namespace
             input.totals.bytes += received;
             input.totals.ticks += ticks;
             if (ticks > input.totals.worstTicks) input.totals.worstTicks = ticks;
+            if (wallMs >= 500)
+            {
+                char timing[128];
+                sprintf_s(timing, sizeof(timing),
+                          "DVD read-ahead batch: bytes=%lu elapsed=%lu ms terminal=%d",
+                          static_cast<unsigned long>(received), wallMs, input.navTerminal);
+                LogDvdNavStartup(timing);
+            }
             if (received)
             {
                 input.lengths[slot] = received;
@@ -497,8 +547,17 @@ namespace
             LeaveCriticalSection(&input.lock);
             if (terminal)
                 return terminal;
+            const DWORD waitStart = GetTickCount();
             if (WaitForSingleObject(input.dataReady, INFINITE) != WAIT_OBJECT_0)
                 return AVERROR(EIO);
+            const DWORD waitMs = GetTickCount() - waitStart;
+            if (waitMs >= 500)
+            {
+                char timing[96];
+                sprintf_s(timing, sizeof(timing), "FFmpeg waiting for read-ahead data: %lu ms",
+                          waitMs);
+                LogDvdNavStartup(timing);
+            }
         }
     }
 

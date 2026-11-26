@@ -1,4 +1,18 @@
 #include "XboxDvdStream.h"
+#ifdef DVD360_LOGGING
+#include "FfmpegFileIo.h"
+#include <stdio.h>
+
+extern "C" void dvd360_log_css_timing(uint32_t code, uint32_t format, uint32_t ms, int32_t status)
+{
+    const char* stage = code == 0x335004 && format == 4 ? "title key" : "drive control";
+    char message[144];
+    sprintf_s(message, sizeof(message), "CSS %s: code=0x%08X format=0x%X %u ms status=0x%08X",
+              stage, static_cast<unsigned>(code), static_cast<unsigned>(format),
+              static_cast<unsigned>(ms), static_cast<unsigned>(status));
+    LogDvdNavStartup(message);
+}
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -126,10 +140,10 @@ HRESULT XboxDvdStream::ProbeCdAudio(CdAudioProbe& probe)
                                         readToc, NULL, 0, toc, sizeof(toc));
     if (status == 0) status = io.status;
     probe.tocBytes = static_cast<unsigned>(io.information);
+    if (status != 0) return HRESULT_FROM_NT(status);
     probe.tocLength = 2 + (toc[0] << 8) + toc[1];
     probe.tocFirst = toc[2];
     probe.tocLast = toc[3];
-    if (status != 0) return HRESULT_FROM_NT(status);
 
     probe.stage = "parse TOC";
     const unsigned tocSize = probe.tocLength;
@@ -164,7 +178,7 @@ HRESULT XboxDvdStream::ProbeCdAudio(CdAudioProbe& probe)
                 probe.startLba = lbas[i];
                 probe.endLba = lbas[i + 1];
             }
-            probe.tracks[probe.audioTracks++] = {lbas[i], lbas[i + 1]};
+            probe.tracks[probe.audioTracks++] = {lbas[i], lbas[i + 1], track[2]};
         }
     }
     if (!probe.audioTracks)
@@ -285,6 +299,13 @@ bool XboxDvdStream::Open()
 
 void XboxDvdStream::Close()
 {
+#ifdef DVD360_LOGGING
+    m_firstOpticalRead = true;
+    m_opticalReadCalls = 0;
+    m_opticalReadBytes = 0;
+    m_opticalReadTotalMs = 0;
+    m_opticalReadWorstMs = 0;
+#endif
     if (IsOpen())
         CloseHandle(m_device);
     m_device = INVALID_HANDLE_VALUE;
@@ -342,10 +363,39 @@ int XboxDvdStream::Read(void* buffer, int byteCount)
         LARGE_INTEGER offset;
         offset.QuadPart = m_position;
         DvdIoStatus io = {};
+#ifdef DVD360_LOGGING
+        const DWORD readStart = GetTickCount();
+#endif
         m_status = NtReadFile(m_device, NULL, NULL, NULL, &io, aligned,
                               requested, &offset);
         if (m_status == 0)
             m_status = io.status;
+#ifdef DVD360_LOGGING
+        const DWORD readMs = GetTickCount() - readStart;
+        ++m_opticalReadCalls;
+        m_opticalReadBytes += io.information;
+        m_opticalReadTotalMs += readMs;
+        if (readMs > m_opticalReadWorstMs) m_opticalReadWorstMs = readMs;
+        if ((m_opticalReadCalls % 16) == 0)
+        {
+            char summary[144];
+            sprintf_s(summary, sizeof(summary),
+                      "DVD optical read summary: calls=%u bytes=%I64u total=%I64u ms worst=%lu ms",
+                      m_opticalReadCalls, m_opticalReadBytes, m_opticalReadTotalMs,
+                      m_opticalReadWorstMs);
+            LogDvdNavStartup(summary);
+        }
+        if (m_firstOpticalRead || readMs >= 250)
+        {
+            char message[144];
+            sprintf_s(message, sizeof(message), "DVD %s optical read: LBA=%llu bytes=%u %u ms status=0x%08X",
+                      m_firstOpticalRead ? "first" : "slow", m_position / kSectorSize,
+                      static_cast<unsigned>(requested), static_cast<unsigned>(readMs),
+                      static_cast<unsigned>(m_status));
+            LogDvdNavStartup(message);
+        }
+        m_firstOpticalRead = false;
+#endif
         if (m_status != 0)
         {
             if (requested > kSectorSize &&

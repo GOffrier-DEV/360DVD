@@ -272,6 +272,8 @@ DWORD PlaybackOsd::ReadPressedButtons()
 PlaybackOsd::Action PlaybackOsd::UpdateCd()
 {
     const DWORD pressed = ReadPressedButtons();
+    if (pressed & XINPUT_GAMEPAD_Y) return RipDisc;
+    if (pressed & XINPUT_GAMEPAD_B) return CancelRip;
     const DWORD horizontal = pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT);
     if (horizontal == XINPUT_GAMEPAD_DPAD_LEFT && m_cdSelected > 0) --m_cdSelected;
     if (horizontal == XINPUT_GAMEPAD_DPAD_RIGHT && m_cdSelected < 2) ++m_cdSelected;
@@ -286,6 +288,18 @@ void PlaybackOsd::ResetCdFocus()
     m_cdSelected = 1;
     m_cdFocused = -1;
     m_cdPaused = -1;
+    SetCdRipStatus("Y: Rip Disc to WAV");
+}
+
+void PlaybackOsd::SetCdRipStatus(const char* status)
+{
+    HXUIOBJ label;
+    if (m_cdScene && SUCCEEDED(XuiElementGetChildById(m_cdScene, L"txt_Rip", &label)))
+    {
+        wchar_t text[96];
+        swprintf_s(text, ARRAYSIZE(text), L"%hs", status);
+        XuiControlSetText(label, text);
+    }
 }
 
 void PlaybackOsd::DrawCd(bool paused, double elapsed)

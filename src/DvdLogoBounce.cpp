@@ -373,6 +373,55 @@ void DvdLogoBounce::Render(bool noDisc)
     m_device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 }
 
+void DvdLogoBounce::RenderNoDisc()
+{
+    if (!m_device || !m_vertexShader || !m_pixelShader)
+        return;
+    if (!m_noDiscLoadAttempted)
+    {
+        m_noDiscLoadAttempted = true;
+        UINT size = 0;
+        const BYTE* png = FindDvdResource(L"DVD-plus-CD-original.png", size);
+        D3DXIMAGE_INFO info = {};
+        if (png && SUCCEEDED(D3DXGetImageInfoFromFileInMemory(png, size, &info)) &&
+            SUCCEEDED(D3DXCreateTextureFromFileInMemory(m_device, png, size, &m_noDiscTexture)))
+            m_noDiscAspect = float(info.Width) / info.Height;
+    }
+    if (!m_noDiscTexture)
+        return;
+
+    const float halfWidth = .28f;
+    const float halfHeight = halfWidth * (16.f / 9.f) / m_noDiscAspect;
+    const Vertex quad[] =
+    {
+        { -halfWidth,  halfHeight, 0.0f, 1.0f, 0.0f, 0.0f },
+        {  halfWidth,  halfHeight, 0.0f, 1.0f, 1.0f, 0.0f },
+        { -halfWidth, -halfHeight, 0.0f, 1.0f, 0.0f, 1.0f },
+        {  halfWidth, -halfHeight, 0.0f, 1.0f, 1.0f, 1.0f }
+    };
+    const float tint[4] = { 1.f, 1.f, 1.f, 1.f };
+    m_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    m_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    m_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    m_device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    m_device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    m_device->SetVertexDeclaration(m_vertexDeclaration);
+    m_device->SetVertexShader(m_vertexShader);
+    m_device->SetPixelShader(m_pixelShader);
+    m_device->SetPixelShaderConstantF(0, tint, 1);
+    m_device->SetTexture(0, m_noDiscTexture);
+    m_device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    m_device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    m_device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    m_device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    m_device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    m_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+    m_device->SetTexture(0, NULL);
+    m_device->SetVertexShader(NULL);
+    m_device->SetPixelShader(NULL);
+    m_device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+}
+
 void DvdLogoBounce::Shutdown()
 {
     if (m_noDiscTexture) m_noDiscTexture->Release();

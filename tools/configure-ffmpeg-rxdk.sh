@@ -165,4 +165,4 @@ exec "$src/configure" \
     --enable-swresample --disable-swscale \
     --enable-decoder=mpeg2video,ac3,mp2,pcm_dvd,dca,dvdsub \
     --enable-parser=mpegvideo,ac3,mpegaudio,dca,dvdsub \
-    --enable-demuxer=mpegps,mpegvideo "$@"
+    --enable-demuxer=mpegps,mpegvideo --enable-muxer=wav "$@"

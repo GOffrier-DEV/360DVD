@@ -192,6 +192,50 @@ HRESULT XboxDvdStream::ProbeCdAudio(CdAudioProbe& probe)
     return ReadCdAudio(probe.startLba, 1, pcm, probe.bytesRead);
 }
 
+HRESULT XboxDvdStream::ReadOpticalInfo(const BYTE* cdb, unsigned cdbSize, BYTE* data,
+                                      unsigned capacity, unsigned& bytesRead, BYTE (&sense)[18])
+{
+    bytesRead = 0;
+    memset(sense, 0, sizeof(sense));
+    if (!IsOpen() || !cdb || !data || !capacity || capacity > 0x20000 ||
+        ((reinterpret_cast<ULONG_PTR>(data) | capacity) & 1) ||
+        !((cdbSize == 6 && (cdb[0] == 0x12 || cdb[0] == 0x1a)) ||
+          (cdbSize == 10 && (cdb[0] == 0x42 || cdb[0] == 0x46 || cdb[0] == 0x5a)) ||
+          (cdbSize == 12 && cdb[0] == 0xbe)))
+        return E_INVALIDARG;
+
+    struct PassThrough
+    {
+        USHORT length;
+        BYTE reserved[5];
+        BYTE dataIn;
+        ULONG transferLength, timeout;
+        void* buffer;
+        BYTE command[16];
+    };
+    // Verified against SataCdRomStartScsiPassThrough in the Xbox 360 kernel.
+    static_assert(sizeof(PassThrough) == 36 && offsetof(PassThrough, dataIn) == 7 &&
+                  offsetof(PassThrough, transferLength) == 8 && offsetof(PassThrough, buffer) == 16 &&
+                  offsetof(PassThrough, command) == 20, "Xbox SCSI pass-through layout");
+    PassThrough request = {};
+    request.length = sizeof(request);
+    request.dataIn = 1;
+    request.transferLength = capacity;
+    request.buffer = data;
+    memcpy(request.command, cdb, cdbSize);
+    DvdIoStatus io = {};
+    const ULONG passThroughDirect = 0x4d014;
+    LONG status = NtDeviceIoControlFile(m_device, NULL, NULL, NULL, &io, passThroughDirect,
+                                       &request, sizeof(request), sense, sizeof(sense));
+    if (status == 0) status = io.status;
+    if (status) return HRESULT_FROM_NT(status);
+    // CHECK CONDITION is returned as sense data with successful NT status.
+    if (io.information == sizeof(sense)) return E_FAIL;
+    // The kernel does not return a data transfer count in this IOCTL.
+    bytesRead = capacity;
+    return S_OK;
+}
+
 HRESULT XboxDvdStream::ReadCdAudio(unsigned lba, unsigned sectors, void* pcm,
                                  unsigned& bytesRead)
 {

@@ -28,10 +28,11 @@ public:
     void ShowDeinterlacePopup();
     void ShowNoDisc();
     void DrawNoDisc();
-    Action UpdateCd();
+    Action UpdateCd(bool pickingEdition = false);
     void DrawCd(bool paused, double elapsed);
     void ResetCdFocus();
     void SetCdRipStatus(const char* status);
+    void SetCdEditionPopup(const char* text);
     bool Ready() const { return m_decl != NULL; }
     void DrawBitmap(IDirect3DDevice9* device, float x, float y, float sx, float sy,
                     unsigned width, unsigned height, const BYTE* pixels, int pitch,
@@ -54,6 +55,8 @@ private:
     HXUIOBJ m_stockScenes[2], m_stockPopup;
     unsigned m_cdSelected = 1;
     HXUIOBJ m_cdScene = NULL;
+    HXUIOBJ m_cdEditionScene = NULL;
+    bool m_cdEditionPopup = false;
     HXUIOBJ m_noDiscScene = NULL;
     int m_cdFocused = -1;
     int m_cdPaused = -1;

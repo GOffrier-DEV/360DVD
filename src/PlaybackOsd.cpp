@@ -132,6 +132,21 @@ HRESULT PlaybackOsd::OpenStock(IDirect3DDevice9* device, const D3DPRESENT_PARAME
         XuiSceneCreate(root, L"NoDisc.xur", NULL, &m_noDiscScene);
         stage = SUCCEEDED(XuiSceneCreate(root, L"DvdTrackPopup.xur", NULL, &m_stockPopup))
             ? "Stock XUI: ready" : "Stock XUI: ready (track popup asset unavailable)";
+        if (SUCCEEDED(XuiSceneCreate(root, L"DvdTrackPopup.xur", NULL, &m_cdEditionScene)))
+        {
+            HXUIOBJ child;
+            const D3DXVECTOR3 panel(24, 303, 0), text(34, 305, 0);
+            if (SUCCEEDED(XuiElementGetChildById(m_cdEditionScene, L"titleBackground", &child)))
+            {
+                XuiElementSetPosition(child, &panel);
+                XuiElementSetBounds(child, 672, 29);
+            }
+            if (SUCCEEDED(XuiElementGetChildById(m_cdEditionScene, L"txt_Action", &child)))
+            {
+                XuiElementSetPosition(child, &text);
+                XuiElementSetBounds(child, 652, 24);
+            }
+        }
     }
     return hr;
 }
@@ -142,6 +157,8 @@ void PlaybackOsd::CloseStock()
     m_noDiscScene = NULL;
     if (m_cdScene) XuiDestroyObject(m_cdScene);
     m_cdScene = NULL;
+    if (m_cdEditionScene) XuiDestroyObject(m_cdEditionScene);
+    m_cdEditionScene = NULL;
     ResetCdFocus();
     if (m_stockPopup) XuiDestroyObject(m_stockPopup);
     m_stockPopup = NULL;
@@ -269,9 +286,17 @@ DWORD PlaybackOsd::ReadPressedButtons()
     return pressed;
 }
 
-PlaybackOsd::Action PlaybackOsd::UpdateCd()
+PlaybackOsd::Action PlaybackOsd::UpdateCd(bool pickingEdition)
 {
     const DWORD pressed = ReadPressedButtons();
+    if (pickingEdition)
+    {
+        if (pressed & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_LEFT)) return PreviousChapter;
+        if (pressed & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_RIGHT)) return NextChapter;
+        if (pressed & XINPUT_GAMEPAD_A) return DiscActivate;
+        if (pressed & XINPUT_GAMEPAD_B) return CancelRip;
+        return None;
+    }
     if (pressed & XINPUT_GAMEPAD_Y) return RipDisc;
     if (pressed & XINPUT_GAMEPAD_B) return CancelRip;
     const DWORD horizontal = pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT);
@@ -285,10 +310,24 @@ PlaybackOsd::Action PlaybackOsd::UpdateCd()
 
 void PlaybackOsd::ResetCdFocus()
 {
+    m_cdEditionPopup = false;
     m_cdSelected = 1;
     m_cdFocused = -1;
     m_cdPaused = -1;
     SetCdRipStatus("Y: Rip Disc to WAV");
+}
+
+void PlaybackOsd::SetCdEditionPopup(const char* text)
+{
+    m_cdEditionPopup = text != NULL;
+    HXUIOBJ label;
+    if (text && m_cdEditionScene && SUCCEEDED(XuiElementGetChildById(m_cdEditionScene, L"txt_Action", &label)))
+    {
+        wchar_t wide[160];
+        if (!MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, ARRAYSIZE(wide)))
+            swprintf_s(wide, ARRAYSIZE(wide), L"%hs", text);
+        XuiControlSetText(label, wide);
+    }
 }
 
 void PlaybackOsd::SetCdRipStatus(const char* status)
@@ -333,6 +372,11 @@ void PlaybackOsd::DrawCd(bool paused, double elapsed)
         XUIMessageRender render;
         XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
         XuiSendMessage(m_cdScene, &msg);
+        if (m_cdEditionPopup && m_cdEditionScene)
+        {
+            XuiMessageRender(&msg, &render, m_stockDc, 0xffffffff, XUI_BLEND_NORMAL);
+            XuiSendMessage(m_cdEditionScene, &msg);
+        }
         XuiRenderEnd(m_stockDc);
     }
 }

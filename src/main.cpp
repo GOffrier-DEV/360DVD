@@ -24,16 +24,17 @@ extern "C" int32_t dvd360_css_last_error();
 
 namespace
 {
+    CRITICAL_SECTION bootLogLock;
+
     void BootLog(const char* message, HRESULT result = S_OK, bool logInRelease = false)
     {
-#if !defined(DVD360_LOGGING) && !defined(DVD360_PERF_LOGGING)
-        if (!logInRelease) return;
-#endif
+#if defined(DVD360_LOGGING) || defined(DVD360_PERF_LOGGING)
         char line[320];
         sprintf_s(line, sizeof(line), "%s (status=0x%08X)\r\n",
                   message, (unsigned int)result);
         OutputDebugStringA(line);
 
+        EnterCriticalSection(&bootLogLock);
         static bool firstLine = true;
         HANDLE file = CreateFile("game:\\360DVD.log", GENERIC_WRITE,
                                  FILE_SHARE_READ, NULL,
@@ -48,6 +49,8 @@ namespace
             FlushFileBuffers(file);
             CloseHandle(file);
         }
+        LeaveCriticalSection(&bootLogLock);
+#endif
     }
     // XAM normally responds to an optical-tray removal by launching its
     // dashboard fallback, which terminates the current title. We retain
@@ -228,6 +231,26 @@ namespace
             return InterlockedCompareExchange(&ripState, Requested, Idle) == Idle;
         }
         LONG RipProgress() { return InterlockedCompareExchange(&ripProgress, 0, 0); }
+        bool MetadataPending() const
+        {
+            return metadataDone && WaitForSingleObject(metadataDone, 0) == WAIT_TIMEOUT;
+        }
+        bool TakeMetadataResult()
+        {
+            if (metadataReported || !metadataDone || MetadataPending()) return false;
+            metadataReported = true;
+            return true;
+        }
+        const CdEditionPicker* EditionChoices() const
+        {
+            return editions.ready && WaitForSingleObject(editions.ready, 0) == WAIT_OBJECT_0 &&
+                   WaitForSingleObject(editions.decided, 0) == WAIT_TIMEOUT ? &editions : NULL;
+        }
+        void ChooseEdition(int index)
+        {
+            editions.selected = index;
+            SetEvent(editions.decided);
+        }
         const char* TakeConnectionResult()
         {
             if (!connectionThread || WaitForSingleObject(connectionThread, 0) != WAIT_OBJECT_0)
@@ -257,6 +280,14 @@ namespace
             CloseHandle(ripCancel);
             if (connectionDone) CloseHandle(connectionDone);
             connectionDone = NULL;
+            if (metadataDone) CloseHandle(metadataDone);
+            metadataDone = NULL;
+            if (editions.ready) CloseHandle(editions.ready);
+            if (editions.decided) CloseHandle(editions.decided);
+            editions = {};
+            metadataReported = false;
+            free(metadata.cover);
+            metadata = {};
             free(lookup.response);
             lookup = {};
             thread = stop = ripCancel = NULL;
@@ -270,6 +301,11 @@ namespace
             sprintf_s(player.connectionResult, sizeof(player.connectionResult),
                       "%s   Y: Rip Disc", player.lookup.status);
             SetEvent(player.connectionDone);
+            if (player.metadataDone)
+            {
+                LookupCdMetadata(player.probe, player.stop, player.metadata, player.editions);
+                SetEvent(player.metadataDone);
+            }
             return 0;
         }
         static DWORD WINAPI Run(void* context)
@@ -286,6 +322,10 @@ namespace
         HANDLE ripCancel = NULL;
         HANDLE connectionThread = NULL;
         HANDLE connectionDone = NULL;
+        HANDLE metadataDone = NULL;
+        bool metadataReported = false;
+        CdEditionPicker editions = {};
+        CdMetadata metadata = {};
         char connectionResult[96] = {};
         AccurateRipLookup lookup = {};
         enum { Idle, Requested, RippingDisc, Finished };
@@ -320,11 +360,15 @@ namespace
             connectionDone = CreateEvent(NULL, TRUE, FALSE, NULL);
             if (connectionDone)
             {
+                metadataDone = CreateEvent(NULL, TRUE, FALSE, NULL);
+                editions.ready = CreateEvent(NULL, TRUE, FALSE, NULL);
+                editions.decided = CreateEvent(NULL, TRUE, FALSE, NULL);
                 connectionThread = CreateThread(NULL, 0, CheckConnection, this, 0, NULL);
                 if (!connectionThread)
                 {
                     strcpy_s(lookup.status, sizeof(lookup.status), "AccurateRip lookup unavailable");
                     SetEvent(connectionDone);
+                    if (metadataDone) SetEvent(metadataDone);
                 }
             }
             return true;
@@ -346,6 +390,8 @@ namespace
             BootLog("CD audio: worker optical open failed", status, true);
             return status;
         }
+        CdDriveInfo driveInfo = {};
+        ProbeCdDrive(stream, probe, driveInfo);
         IXAudio2* engine = NULL;
         IXAudio2MasteringVoice* master = NULL;
         IXAudio2SourceVoice* voice = NULL;
@@ -390,7 +436,7 @@ namespace
                 InterlockedExchange(&paused, 1);
                 InterlockedExchange(&skip, 0);
                 const HRESULT result = RipAudioCd(stream, probe, stop, ripCancel, connectionDone, lookup,
-                                                  ripProgress, ripResult);
+                                                  driveInfo, metadataDone, metadata, ripProgress, ripResult);
                 BootLog(ripResult, result, true);
                 InterlockedExchange(&ripState, Finished);
                 continue;
@@ -591,6 +637,7 @@ namespace
     void ProbeLog(const char* stage, LONG status = 0,
                   const char* path = "game:\\360DVD-probe.log")
     {
+#ifdef DVD360_LOGGING
         // Replace a short checkpoint rather than appending to the boot log.
         char line[64];
         const int length = sprintf_s(line, sizeof(line), "%s 0x%08X\r\n",
@@ -611,6 +658,7 @@ namespace
             written != (DWORD)length || !FlushFileBuffers(file))
             OutputDebugStringA("Could not persist DVD probe checkpoint\r\n");
         CloseHandle(file);
+#endif
     }
 
     void ProbeCss(XboxDvdStream& stream, uint32_t start, uint32_t size)
@@ -883,7 +931,7 @@ namespace
 #endif
     }
 
-    int Run()
+    __attribute__((optnone)) int Run()
     {
         BootLog("360DVD boot");
         InstallEjectTitleExitPatch();
@@ -1149,9 +1197,43 @@ namespace
                 }
                 if (const char* result = cdAudio.TakeRipResult())
                     osd.SetCdRipStatus(result);
-                const PlaybackOsd::Action action = osd.UpdateCd();
-                if (action == PlaybackOsd::CancelRip) cdAudio.CancelRip();
-                if (action == PlaybackOsd::RipDisc && cdAudio.RequestRip())
+                if (cdAudio.TakeMetadataResult() && !cdAudio.Ripping())
+                    osd.SetCdRipStatus("Y: Rip Disc to WAV");
+                static unsigned editionIndex = 0;
+                const CdEditionPicker* choices = cdAudio.EditionChoices();
+                const PlaybackOsd::Action action = osd.UpdateCd(choices != NULL);
+                if (choices)
+                {
+                    if (editionIndex >= choices->count) editionIndex = 0;
+                    if (action == PlaybackOsd::PreviousChapter)
+                        editionIndex = (editionIndex + choices->count - 1) % choices->count;
+                    if (action == PlaybackOsd::NextChapter)
+                        editionIndex = (editionIndex + 1) % choices->count;
+                    if (action == PlaybackOsd::DiscActivate || action == PlaybackOsd::CancelRip)
+                    {
+                        cdAudio.ChooseEdition(action == PlaybackOsd::DiscActivate ? int(editionIndex) : -1);
+                        osd.SetCdEditionPopup(NULL);
+                        osd.SetCdRipStatus("Finishing metadata lookup...");
+                        editionIndex = 0;
+                    }
+                    else
+                    {
+                        char popup[160];
+                        sprintf_s(popup, sizeof(popup), "Edition %u/%u: %s", editionIndex + 1,
+                                  choices->count, choices->labels[editionIndex]);
+                        osd.SetCdEditionPopup(popup);
+                        osd.SetCdRipStatus("D-pad: Browse   A: Select edition   B: Skip tags");
+                    }
+                }
+                else
+                {
+                    editionIndex = 0;
+                    osd.SetCdEditionPopup(NULL);
+                }
+                if (!choices && action == PlaybackOsd::CancelRip) cdAudio.CancelRip();
+                if (!choices && action == PlaybackOsd::RipDisc && cdAudio.MetadataPending())
+                    osd.SetCdRipStatus("Looking up CD metadata...");
+                else if (!choices && action == PlaybackOsd::RipDisc && cdAudio.RequestRip())
                 {
                     displayedRipProgress = CdRipPreparing;
                     osd.SetCdRipStatus("Preparing WAV export to HDD   B: Cancel");
@@ -1164,7 +1246,9 @@ namespace
                         displayedRipProgress = progress;
                         char text[96];
                         if (progress == CdRipVerifying)
-                            osd.SetCdRipStatus("WAVs saved   Checking AccurateRip online   B: Cancel");
+                            osd.SetCdRipStatus("WAVs saved   Checking AccurateRip   B: Cancel");
+                        else if (progress == CdRipCalibrating)
+                            osd.SetCdRipStatus("Calibrating CD drive with AccurateRip   B: Cancel");
                         else if (progress >= 0)
                         {
                             sprintf_s(text, sizeof(text), "WAV Track %02u: %u%%   Disc: %u%%   B: Cancel",
@@ -1174,7 +1258,7 @@ namespace
                         }
                     }
                 }
-                else
+                else if (!choices)
                 {
                     if (action == PlaybackOsd::TogglePause) cdAudio.TogglePause();
                     if (action == PlaybackOsd::PreviousChapter) cdAudio.Skip(-1);
@@ -1495,12 +1579,16 @@ namespace
     }
 }
 
-void LogAccurateRipFailure(const char* message)
+void LogCdDiagnostic(const char* message, HRESULT status)
 {
-    BootLog(message, S_OK, true);
+    BootLog(message, status, true);
 }
 
 int main()
 {
-    return Run();
+    InitializeCriticalSection(&bootLogLock);
+    InstallCdOffsetTable();
+    const int result = Run();
+    DeleteCriticalSection(&bootLogLock);
+    return result;
 }

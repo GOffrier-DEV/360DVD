@@ -3,6 +3,16 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-11-27
+
+- Tag ripped WAVs with MusicBrainz metadata, available ISRCs, and embedded
+  front cover art. Choose an edition on the console when several match.
+- Identify the optical drive and load editable offsets from the
+  self-extracted `drive-offsets.json`; use AccurateRip for unknown offsets.
+- Read up to 48 CD sectors per batch. Leave spindle speed under kernel control.
+- Disable diagnostic logging in regular Release builds. WAV verification
+  results remain available in each rip's `rip.txt`.
+
 ## [1.6.1] - 2026-11-26
 
 - Download AccurateRip records over HTTPS when the CD player opens. Ripping

@@ -30,6 +30,8 @@ public:
     };
     HRESULT ProbeCdAudio(CdAudioProbe& probe);
     HRESULT ReadCdAudio(unsigned lba, unsigned sectors, void* pcm, unsigned& bytesRead);
+    HRESULT ReadOpticalInfo(const BYTE* cdb, unsigned cdbSize, BYTE* data, unsigned capacity,
+                            unsigned& bytesRead, BYTE (&sense)[18]);
     // The stream must outlive the reader returned by DVDOpenStream.
     static dvd_reader_stream_cb* ReaderCallbacks();
     static dvd_reader_stream_cb* ReaderAuthCallbacks();

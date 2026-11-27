@@ -1,11 +1,16 @@
 param(
     [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
     [switch]$VideoPerfLogging,
+    [string]$BearSslRoot = (Join-Path $PSScriptRoot '..\Prism\deps\XexUtils\deps\BearSSL'),
     [string]$RxdkRoot = 'C:\Program Files\RXDK-360',
     [string]$MSBuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
 )
 
 $ErrorActionPreference = 'Stop'
+$BearSslRoot = [IO.Path]::GetFullPath($BearSslRoot)
+if (-not (Test-Path (Join-Path $BearSslRoot 'src\inner.h'))) {
+    throw 'Set -BearSslRoot to the BearSSL source directory (containing inc and src).'
+}
 $RxdkRoot = [IO.Path]::GetFullPath($RxdkRoot)
 $clangRoot = Join-Path $RxdkRoot 'bin\clang'
 $clang = Join-Path $clangRoot 'bin\clang.exe'
@@ -14,6 +19,8 @@ $rxdkLib = Join-Path $RxdkRoot 'lib\xbox'
 $output = Join-Path $PSScriptRoot "build\$Configuration"
 $libraryProject = Join-Path $PSScriptRoot '360DVD-libs.vcxproj'
 $dvdLibrary = Join-Path $PSScriptRoot 'build\libdvd360.a'
+$bearSslLibrary = Join-Path $PSScriptRoot 'build\libbearssl360.a'
+$bearSslObjects = Join-Path $PSScriptRoot 'build\obj\bearssl'
 $runtime = Join-Path $PSScriptRoot "build\runtime"
 $helperObjects = Join-Path $runtime 'helper-objects'
 $helperLib = Join-Path $runtime 'xdk-compiler-helpers.lib'
@@ -93,6 +100,19 @@ if (Test-Path $dvdLibrary) { Remove-Item $dvdLibrary -Force }
 & $ar rcs $dvdLibrary @libraryObjects
 if ($LASTEXITCODE -ne 0) { throw 'Could not archive the DVD library objects.' }
 
+$bearSslProperties = @('/p:Configuration=Release', '/p:Platform=Xbox 360',
+    "/p:RxdkClangRoot=$clangRoot", "/p:RxdkInstallDir=$RxdkRoot", "/p:RxdkLibcDir=$runtime",
+    "/p:BearSslRoot=$BearSslRoot", "/p:IntDir=$bearSslObjects\")
+& $MSBuild $libraryProject /t:Clean /nologo /v:minimal @bearSslProperties
+if ($LASTEXITCODE -ne 0) { throw 'Could not clean BearSSL objects.' }
+& $MSBuild $libraryProject /t:ClCompile /nologo /v:minimal @bearSslProperties
+if ($LASTEXITCODE -ne 0) { throw 'Compiling BearSSL with RXDK Clang failed.' }
+$objects = @(Get-ChildItem $bearSslObjects -Filter '*.o' | ForEach-Object FullName)
+if ($objects.Count -eq 0) { throw 'RXDK Clang produced no BearSSL objects.' }
+if (Test-Path $bearSslLibrary) { Remove-Item $bearSslLibrary -Force }
+& $ar rcs $bearSslLibrary @objects
+if ($LASTEXITCODE -ne 0) { throw 'Could not archive the BearSSL objects.' }
+
 $helperMembers = @('crtfpr.o', 'crtgpr.o', 'crtvmx.o', 'chkstk.o', 'u64tod.o')
 & $ar x "--output=$helperObjects" (Join-Path $rxdkLib 'libcMT.a') @helperMembers
 if ($LASTEXITCODE -ne 0) { throw 'Could not extract RXDK Clang ABI helper objects.' }
@@ -110,6 +130,8 @@ $resourceDir = Join-Path $PSScriptRoot "build\embedded\$Configuration"
     "/p:RxdkClangRoot=$clangRoot" "/p:RxdkInstallDir=$RxdkRoot" `
     "/p:RxdkLibcDir=$runtime" "/p:RxdkHelperLib=$helperLib" `
     "/p:DvdLibraries=$dvdLibrary" `
+    "/p:BearSslRoot=$BearSslRoot" `
+    "/p:BearSslLibrary=$bearSslLibrary" `
     "/p:EmbeddedResourceDir=$resourceDir" `
     $videoPerfProperty `
     @ffmpegProperties `

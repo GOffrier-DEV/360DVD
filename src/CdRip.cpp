@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <bearssl.h>
 #include "CdRip.h"
 
 extern "C" {
@@ -206,23 +207,20 @@ namespace
         return id;
     }
 
-    int ConnectDatabase(SOCKET socketFd, const sockaddr_in& address, HANDLE stop, HANDLE cancel,
-                        const char*& failure)
+    int ConnectDatabase(SOCKET socketFd, const sockaddr_in& address, HANDLE stop,
+                        const char*& failure, int& plainTcpError)
     {
         // XexUtils uses this Xbox-specific option for ordinary Internet TCP.
         const int xboxPlainTcp = 0x5801;
         const BOOL enabled = TRUE;
+        plainTcpError = 0;
         if (setsockopt(socketFd, SOL_SOCKET, xboxPlainTcp,
                        reinterpret_cast<const char*>(&enabled), sizeof(enabled)) == SOCKET_ERROR)
         {
             const int error = WSAGetLastError();
-            if (error != WSAEACCES)
-            {
-                failure = "plain TCP option failed";
-                return error;
-            }
-            // Some kernels reject the optional override. Try their default
-            // transport settings and report whether connect itself succeeds.
+            plainTcpError = error;
+            failure = error == WSAEACCES ? "console denied Internet socket" : "plain TCP option failed";
+            return error;
         }
 
         u_long nonblocking = 1;
@@ -230,32 +228,200 @@ namespace
         if (ioctlsocket(socketFd, FIONBIO, &nonblocking)) return WSAGetLastError();
         failure = "TCP connect failed";
         if (!connect(socketFd, reinterpret_cast<const sockaddr*>(&address), sizeof(address))) return 0;
-        const int pending = WSAGetLastError();
-        if (pending != WSAEWOULDBLOCK && pending != WSAEINPROGRESS) return pending;
+        int error = WSAGetLastError();
+        if (error != WSAEWOULDBLOCK && error != WSAEINPROGRESS) return error;
 
+        // A writable Xbox socket can still be unconnected. Confirm the peer
+        // before handing the socket to BearSSL.
         const DWORD start = GetTickCount();
-        while (GetTickCount() - start < 8000 && !Cancelled(stop, cancel))
+        while (GetTickCount() - start < 8000 && WaitForSingleObject(stop, 50) == WAIT_TIMEOUT)
         {
-            fd_set writable, failed;
-            FD_ZERO(&writable);
-            FD_ZERO(&failed);
-            FD_SET(socketFd, &writable);
-            FD_SET(socketFd, &failed);
-            timeval timeout = {0, 250000};
-            const int ready = select(0, NULL, &writable, &failed, &timeout);
-            if (ready == SOCKET_ERROR)
-            {
-                failure = "TCP select failed";
-                return WSAGetLastError();
-            }
-            if (failed.fd_count)
-            {
-                // Xbox Winsock does not expose SO_ERROR.
-                return WSAECONNREFUSED;
-            }
-            if (writable.fd_count) return 0;
+            sockaddr_in peer = {};
+            int length = sizeof(peer);
+            if (!getpeername(socketFd, reinterpret_cast<sockaddr*>(&peer), &length)) return 0;
+            error = WSAGetLastError();
+            if (error != WSAENOTCONN && error != WSAEWOULDBLOCK && error != WSAEINPROGRESS)
+                return error;
         }
         return WSAETIMEDOUT;
+    }
+
+    const char accurateRipHost[] = "www.accuraterip.com";
+
+    struct TlsSocket
+    {
+        SOCKET socket;
+        HANDLE stop, cancel;
+        DWORD start;
+        int& error;
+        unsigned sent, received;
+    };
+
+    int TransferTls(TlsSocket& io, void* buffer, size_t length, bool writing)
+    {
+        while (!Cancelled(io.stop, io.cancel) && GetTickCount() - io.start < 15000)
+        {
+            char* bytes = static_cast<char*>(buffer);
+            const int count = writing ? send(io.socket, bytes, int(length), 0)
+                                      : recv(io.socket, bytes, int(length), 0);
+            if (count > 0)
+            {
+                (writing ? io.sent : io.received) += count;
+                return count;
+            }
+            if (count == 0)
+            {
+                io.error = WSAECONNRESET;
+                return -1;
+            }
+            const int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK)
+            {
+                Sleep(10);
+                continue;
+            }
+            io.error = error;
+            return -1;
+        }
+        if (!Cancelled(io.stop, io.cancel)) io.error = WSAETIMEDOUT;
+        return -1;
+    }
+
+    int ReadTls(void* context, unsigned char* buffer, size_t length)
+    {
+        return TransferTls(*static_cast<TlsSocket*>(context), buffer, length, false);
+    }
+
+    int WriteTls(void* context, const unsigned char* buffer, size_t length)
+    {
+        return TransferTls(*static_cast<TlsSocket*>(context), const_cast<unsigned char*>(buffer), length, true);
+    }
+
+    struct DatabaseTls
+    {
+        br_ssl_client_context client;
+        br_x509_minimal_context validator;
+        unsigned char buffer[BR_SSL_BUFSIZE_BIDI];
+    };
+
+    int ReadDatabaseHttps(TlsSocket& socket, const char* request, char* response, int capacity,
+                          const char*& failure)
+    {
+        // ISRG Root YR, the CA above Let's Encrypt YR1 in AccurateRip's chain.
+        static unsigned char dn[] =
+            "\x30\x2e\x31\x0b\x30\x09\x06\x03\x55\x04\x06\x13\x02" "US"
+            "\x31\x0d\x30\x0b\x06\x03\x55\x04\x0a\x13\x04" "ISRG"
+            "\x31\x10\x30\x0e\x06\x03\x55\x04\x03\x13\x07" "Root YR";
+        static unsigned char exponent[] = {1, 0, 1};
+        static const char modulusHex[] =
+            "dbc626737bf024c97562f7f9e19fb0b3794eb34126cf951fd8515ea45bc31bbd"
+            "b06362074043d5f70ec5b494402248335c44d770dbfb90b0d70d2cd04058b2fb"
+            "883ffea3a05d30f1cb8899b811d4e1a061b490e0ea7323e0c6f121ae4e5704"
+            "f3bdce092fa4877b2b968eaf978dcce4e260e007a8d6c7c7a7a913243a088850"
+            "4d24063e38a7d7fc552f60aba18d3fa7a38f659aa9aea52048e4f901422aab10"
+            "6b56539bb153f7105871aef234a3141ce766abdb34f2cc5cc2c5c426f75937eb"
+            "2415d78eabd61bebf86e3cf18e3780b4e954eea6ab443bcd3b202e4182e59fdd"
+            "3833e7da2b1f219cb0a9275e59a9a12070d958fbd30c59c0b9caf2f60368f7"
+            "97dfb66ee820657f9d384f75cd898875ac13bd266e56f95b46b0252f1201ea9c"
+            "0c0639de5c28d843cfb70420a3b2c6d2369654de14dc0437617c09440e562bea"
+            "911ab6731d9834f906a9ca0bdd9b7741213357db2c78a82dc70b0ae89ebd3f19"
+            "90f859aeaecc8a2ee035701c504011f3e97361a97ef734e0ec2e4300bc9539e1"
+            "bf0aa7d100c9f52921c247435203a3fcb67fe619196709cb79aed5422e757249"
+            "5a54e87d6a1a0dc38133aeb247fc79a85332261b2397b33c998ee5eaed6a5b"
+            "24435bada7be3e783cbdd8f2387ed1ca4dbabd216847e1864a8775a724422dfa"
+            "842f95865b63cb6912ba0aac507a3c51b3ac9203472b6ce07aafb87e764458f6ceffc1";
+        unsigned char modulus[(sizeof(modulusHex) - 1) / 2];
+        for (size_t i = 0; i < sizeof(modulus); ++i)
+        {
+            unsigned value = 0;
+            sscanf_s(modulusHex + 2 * i, "%2x", &value);
+            modulus[i] = static_cast<unsigned char>(value);
+        }
+        br_x509_trust_anchor anchor = {};
+        anchor.dn.data = dn;
+        anchor.dn.len = sizeof(dn) - 1;
+        anchor.flags = BR_X509_TA_CA;
+        anchor.pkey.key_type = BR_KEYTYPE_RSA;
+        anchor.pkey.key.rsa.n = modulus;
+        anchor.pkey.key.rsa.nlen = sizeof(modulus);
+        anchor.pkey.key.rsa.e = exponent;
+        anchor.pkey.key.rsa.elen = sizeof(exponent);
+
+        DatabaseTls* tls = static_cast<DatabaseTls*>(malloc(sizeof(DatabaseTls)));
+        failure = "out of memory";
+        if (!tls) return 0;
+        br_ssl_client_init_full(&tls->client, &tls->validator, &anchor, 1);
+        br_ssl_engine_set_buffer(&tls->client.eng, tls->buffer, sizeof(tls->buffer), 1);
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        const uint64_t seconds = ((uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime) / 10000000;
+        br_x509_minimal_set_time(&tls->validator, uint32_t(seconds / 86400 + 584754),
+                                 uint32_t(seconds % 86400));
+        unsigned char seed[32] = {};
+        const int seedError = XNetRandom(seed, sizeof(seed));
+        if (!seedError) br_ssl_engine_inject_entropy(&tls->client.eng, seed, sizeof(seed));
+        SecureZeroMemory(seed, sizeof(seed));
+        failure = "TLS setup failed";
+        int size = 0;
+        if (!seedError && br_ssl_client_reset(&tls->client, accurateRipHost, 0))
+        {
+            br_sslio_context io;
+            br_sslio_init(&io, &tls->client.eng, ReadTls, &socket, WriteTls, &socket);
+            failure = "TLS handshake failed";
+            const int written = br_sslio_write_all(&io, request, strlen(request));
+            if (!written) failure = "HTTPS send failed";
+            if (!written && !br_sslio_flush(&io))
+            {
+                failure = "incomplete HTTPS response";
+                int expected = 0;
+                while (size < capacity)
+                {
+                    const int count = br_sslio_read(&io, response + size, capacity - size);
+                    if (count <= 0) break;
+                    size += count;
+                    response[size] = '\0';
+                    if (!expected)
+                    {
+                        const char* body = strstr(response, "\r\n\r\n");
+                        if (!body) continue;
+                        const char* status = strchr(response, ' ');
+                        if (!status || strncmp(response, "HTTP/", 5)) break;
+                        if (atoi(status + 1) != 200)
+                            expected = int(body + 4 - response);
+                        else
+                        {
+                            const char* header = strstr(response, "\r\n") + 2;
+                            while (header < body && _strnicmp(header, "Content-Length:", 15))
+                                header = strstr(header, "\r\n") + 2;
+                            if (header >= body)
+                            {
+                                failure = "missing HTTPS content length";
+                                break;
+                            }
+                            char* end;
+                            const unsigned long length = strtoul(header + 15, &end, 10);
+                            const int headerSize = int(body + 4 - response);
+                            if (end == header + 15 || *end != '\r' || length > unsigned(capacity - headerSize))
+                            {
+                                failure = "invalid HTTPS content length";
+                                break;
+                            }
+                            expected = headerSize + int(length);
+                        }
+                    }
+                    if (size >= expected)
+                    {
+                        free(tls);
+                        return expected;
+                    }
+                }
+            }
+            if (!socket.error) socket.error = br_ssl_engine_last_error(&tls->client.eng);
+            if (socket.error == WSAETIMEDOUT && socket.sent && !socket.received)
+                failure = "no TLS reply after ClientHello";
+        }
+        free(tls);
+        return 0;
     }
 
     int GetDatabase(const char* request, char* response, int capacity, HANDLE stop, HANDLE cancel,
@@ -272,12 +438,26 @@ namespace
             XNetCleanup();
             return 0;
         }
+        // Give XNet time to acquire its title address before opening the socket.
+        XNADDR titleAddress = {};
+        const DWORD start = GetTickCount();
+        DWORD addressStatus = XNetGetTitleXnAddr(&titleAddress);
+        while (addressStatus == XNET_GET_XNADDR_PENDING && GetTickCount() - start < 6000 &&
+               WaitForSingleObject(stop, 100) == WAIT_TIMEOUT)
+            addressStatus = XNetGetTitleXnAddr(&titleAddress);
+        if (addressStatus == XNET_GET_XNADDR_PENDING || Cancelled(stop, cancel))
+        {
+            failure = "network address not ready";
+            WSACleanup();
+            XNetCleanup();
+            return 0;
+        }
         WSAEVENT event = WSACreateEvent();
         XNDNS* dns = NULL;
         SOCKET socketFd = INVALID_SOCKET;
         int size = 0;
         failure = "DNS lookup failed or timed out";
-        if (event != WSA_INVALID_EVENT && !XNetDnsLookup("www.accuraterip.com", event, &dns))
+        if (event != WSA_INVALID_EVENT && !XNetDnsLookup(accurateRipHost, event, &dns))
         {
             HANDLE events[] = {event, stop, cancel};
             if (WaitForMultipleObjects(stop == cancel ? 2 : 3, events, FALSE, 5000) == WAIT_OBJECT_0 &&
@@ -286,64 +466,46 @@ namespace
                 failure = "server connection failed";
                 sockaddr_in address = {};
                 address.sin_family = AF_INET;
-                address.sin_port = htons(80);
+                address.sin_port = htons(443);
+                int plainTcpError = 0;
                 for (int i = 0; i < dns->cina && !Cancelled(stop, cancel); ++i)
                 {
                     address.sin_addr = dns->aina[i];
                     failure = "socket creation failed";
                     socketFd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
                     socketError = socketFd == INVALID_SOCKET ? WSAGetLastError() :
-                        ConnectDatabase(socketFd, address, stop, cancel, failure);
+                        ConnectDatabase(socketFd, address, stop, failure, plainTcpError);
                     if (!socketError) break;
+                    if (!Cancelled(stop, cancel))
+                    {
+                        char localIp[16] = {};
+                        char remoteIp[16] = {};
+                        XNetInAddrToString(titleAddress.ina, localIp, sizeof(localIp));
+                        XNetInAddrToString(address.sin_addr, remoteIp, sizeof(remoteIp));
+                        char message[192];
+                        sprintf_s(message, sizeof(message),
+                                  "AccurateRip TCP %s -> %s:443: %s (%d), XNet flags=0x%08X, TCP override=%d",
+                                  localIp, remoteIp, failure, socketError, unsigned(addressStatus), plainTcpError);
+                        LogAccurateRipFailure(message);
+                    }
                     if (socketFd != INVALID_SOCKET) closesocket(socketFd);
                     socketFd = INVALID_SOCKET;
                 }
-                if (socketFd != INVALID_SOCKET && !Cancelled(stop, cancel) && !request)
-                    size = 1;
-                if (socketFd != INVALID_SOCKET && !Cancelled(stop, cancel) && request)
+                if (socketFd != INVALID_SOCKET && !Cancelled(stop, cancel))
                 {
-                    const int requestSize = int(strlen(request));
-                    int sent = 0;
-                    bool complete = false;
-                    failure = "HTTP send failed";
-                    const DWORD start = GetTickCount();
-                    while (size < capacity && GetTickCount() - start < 5000 && !Cancelled(stop, cancel))
+                    TlsSocket io = {socketFd, stop, cancel, GetTickCount(), socketError, 0, 0};
+                    size = ReadDatabaseHttps(io, request, response, capacity, failure);
+                    if (!size && !Cancelled(stop, cancel))
                     {
-                        const bool sending = sent < requestSize;
-                        if (!sending) failure = "HTTP receive failed";
-                        fd_set ready;
-                        FD_ZERO(&ready);
-                        FD_SET(socketFd, &ready);
-                        timeval timeout = {0, 250000};
-                        const int selected = select(0, sending ? NULL : &ready,
-                                                    sending ? &ready : NULL, NULL, &timeout);
-                        if (selected == 0) continue;
-                        if (selected == SOCKET_ERROR)
-                        {
-                            socketError = WSAGetLastError();
-                            break;
-                        }
-                        const int count = sending ? send(socketFd, request + sent, requestSize - sent, 0)
-                                                  : recv(socketFd, response + size, capacity - size, 0);
-                        if (count == SOCKET_ERROR)
-                        {
-                            const int error = WSAGetLastError();
-                            if (error == WSAEWOULDBLOCK) continue;
-                            socketError = error;
-                            break;
-                        }
-                        if (count == 0)
-                        {
-                            complete = !sending && size > 0;
-                            break;
-                        }
-                        if (sending) sent += count;
-                        else size += count;
-                    }
-                    if (!complete)
-                    {
-                        if (!socketError && GetTickCount() - start >= 5000) socketError = WSAETIMEDOUT;
-                        size = 0;
+                        char message[160];
+                        sprintf_s(message, sizeof(message),
+                                  "AccurateRip %u.%u.%u.%u:443: %s (%d), TCP override=%d, TLS sent=%u received=%u",
+                                  unsigned(address.sin_addr.S_un.S_un_b.s_b1),
+                                  unsigned(address.sin_addr.S_un.S_un_b.s_b2),
+                                  unsigned(address.sin_addr.S_un.S_un_b.s_b3),
+                                  unsigned(address.sin_addr.S_un.S_un_b.s_b4), failure, socketError,
+                                  plainTcpError, io.sent, io.received);
+                        LogAccurateRipFailure(message);
                     }
                 }
             }
@@ -353,80 +515,89 @@ namespace
         if (event != WSA_INVALID_EVENT) WSACloseEvent(event);
         WSACleanup();
         XNetCleanup();
-        return size < capacity ? size : 0;
+        return size;
     }
 
-    void Verify(const DiscId& id, unsigned tracks, const Checksum* crc,
-                unsigned* confidence, HANDLE stop, HANDLE cancel, char (&summary)[96])
+    void Verify(const DiscId& id, unsigned tracks, const Checksum* crc, unsigned* confidence,
+                const AccurateRipLookup& lookup, char (&summary)[96])
     {
-        char request[256];
-        sprintf_s(request, sizeof(request),
-                  "GET /accuraterip/%x/%x/%x/dBAR-%03u-%08x-%08x-%08x.bin HTTP/1.0\r\n"
-                  "Host: www.accuraterip.com\r\nConnection: close\r\n\r\n",
-                  id.first & 15, (id.first >> 4) & 15, (id.first >> 8) & 15,
-                  tracks, id.first, id.second, id.cddb);
-        const int capacity = 256 * 1024;
-        char* response = static_cast<char*>(malloc(capacity + 1));
-        const char* failure = "out of memory";
-        int socketError = 0;
-        const int size = response ? GetDatabase(request, response, capacity, stop, cancel, failure, socketError) : 0;
-        if (response) response[size] = '\0';
-        const char* body = size ? strstr(response, "\r\n\r\n") : NULL;
-        const char* code = size ? strchr(response, ' ') : NULL;
+        if (!lookup.size)
+        {
+            sprintf_s(summary, sizeof(summary), "WAVs saved; %s", lookup.status);
+            return;
+        }
+        const char* body = strstr(lookup.response, "\r\n\r\n") + 4;
+        const char* end = lookup.response + lookup.size;
         const unsigned recordSize = 13 + 9 * tracks;
-        if (body) body += 4;
-        if (!body || !code || strncmp(code, " 200 ", 5) ||
-            (response + size - body) % recordSize || body == response + size)
+        for (; body < end; body += recordSize)
         {
-            const int httpStatus = code && !strncmp(response, "HTTP/", 5) ? atoi(code + 1) : 0;
-            if (httpStatus == 404)
-                strcpy_s(summary, sizeof(summary), "WAVs saved; disc not in AccurateRip");
-            else if (httpStatus && httpStatus != 200)
-                sprintf_s(summary, sizeof(summary), "WAVs saved; AccurateRip HTTP %d", httpStatus);
-            else if (socketError)
-                sprintf_s(summary, sizeof(summary), "WAVs saved; AccurateRip: %s (%d)", failure, socketError);
-            else
-                sprintf_s(summary, sizeof(summary), "WAVs saved; AccurateRip: %s",
-                          size ? "invalid database response" : failure);
-        }
-        else
-        {
-            for (; body < response + size; body += recordSize)
+            const BYTE* record = reinterpret_cast<const BYTE*>(body);
+            if (record[0] != tracks || AV_RL32(record + 1) != id.first ||
+                AV_RL32(record + 5) != id.second || AV_RL32(record + 9) != id.cddb)
+                continue;
+            for (unsigned i = 0; i < tracks; ++i)
             {
-                const BYTE* record = reinterpret_cast<const BYTE*>(body);
-                if (record[0] != tracks || AV_RL32(record + 1) != id.first ||
-                    AV_RL32(record + 5) != id.second || AV_RL32(record + 9) != id.cddb)
-                    continue;
-                for (unsigned i = 0; i < tracks; ++i)
-                {
-                    const BYTE* entry = record + 13 + 9 * i;
-                    const uint32_t expected = AV_RL32(entry + 1);
-                    if ((expected == crc[i].v1 || expected == crc[i].v2) && entry[0] > confidence[i])
-                        confidence[i] = entry[0];
-                }
+                const BYTE* entry = record + 13 + 9 * i;
+                const uint32_t expected = AV_RL32(entry + 1);
+                if ((expected == crc[i].v1 || expected == crc[i].v2) && entry[0] > confidence[i])
+                    confidence[i] = entry[0];
             }
-            unsigned matched = 0;
-            for (unsigned i = 0; i < tracks; ++i) if (confidence[i]) ++matched;
-            sprintf_s(summary, sizeof(summary), "WAVs saved; AccurateRip matched %u/%u tracks", matched, tracks);
         }
-        free(response);
+        unsigned matched = 0;
+        for (unsigned i = 0; i < tracks; ++i) if (confidence[i]) ++matched;
+        sprintf_s(summary, sizeof(summary), "WAVs saved; AccurateRip matched %u/%u tracks", matched, tracks);
     }
 }
 
-void ProbeAccurateRipConnection(HANDLE stop, char (&summary)[96])
+void LookupAccurateRip(const XboxDvdStream::CdAudioProbe& disc, HANDLE stop, AccurateRipLookup& lookup)
 {
-    const char* failure = "network startup failed";
+    if (disc.dataTracks)
+    {
+        strcpy_s(lookup.status, sizeof(lookup.status), "Mixed-mode AccurateRip lookup unsupported");
+        return;
+    }
+    const DiscId id = Identify(disc);
+    const unsigned tracks = disc.audioTracks;
+    char request[256];
+    sprintf_s(request, sizeof(request),
+              "GET /accuraterip/%x/%x/%x/dBAR-%03u-%08x-%08x-%08x.bin HTTP/1.0\r\n"
+              "Host: www.accuraterip.com\r\nConnection: close\r\n\r\n",
+              id.first & 15, (id.first >> 4) & 15, (id.first >> 8) & 15,
+              tracks, id.first, id.second, id.cddb);
+    const int capacity = 256 * 1024;
+    char* response = static_cast<char*>(malloc(capacity + 1));
+    const char* failure = "out of memory";
     int socketError = 0;
-    if (GetDatabase(NULL, NULL, 2, stop, stop, failure, socketError))
-        strcpy_s(summary, sizeof(summary), "AccurateRip TCP connected   Y: Rip Disc");
+    const int size = response ? GetDatabase(request, response, capacity, stop, stop, failure, socketError) : 0;
+    if (response) response[size] = '\0';
+    const char* body = size ? strstr(response, "\r\n\r\n") : NULL;
+    const char* code = size ? strchr(response, ' ') : NULL;
+    const int httpStatus = code && !strncmp(response, "HTTP/", 5) ? atoi(code + 1) : 0;
+    const unsigned recordSize = 13 + 9 * tracks;
+    if (body) body += 4;
+    if (httpStatus == 200 && body && body < response + size &&
+        (response + size - body) % recordSize == 0)
+    {
+        lookup.response = response;
+        lookup.size = size;
+        strcpy_s(lookup.status, sizeof(lookup.status), "AccurateRip database record downloaded");
+        return;
+    }
+    if (httpStatus == 404)
+        strcpy_s(lookup.status, sizeof(lookup.status), "Disc not in AccurateRip");
+    else if (httpStatus && httpStatus != 200)
+        sprintf_s(lookup.status, sizeof(lookup.status), "AccurateRip HTTP %d", httpStatus);
     else if (socketError)
-        sprintf_s(summary, sizeof(summary), "AccurateRip: %s (%d)   Y: Rip", failure, socketError);
+        sprintf_s(lookup.status, sizeof(lookup.status), "AccurateRip: %s (%d)", failure, socketError);
     else
-        sprintf_s(summary, sizeof(summary), "AccurateRip: %s   Y: Rip", failure);
+        sprintf_s(lookup.status, sizeof(lookup.status), "AccurateRip: %s",
+                  size ? "invalid database response" : failure);
+    free(response);
 }
 
 HRESULT RipAudioCd(XboxDvdStream& stream, const XboxDvdStream::CdAudioProbe& disc,
-                   HANDLE stop, HANDLE cancel, volatile LONG& progress, char (&summary)[96])
+                   HANDLE stop, HANDLE cancel, HANDLE lookupDone, const AccurateRipLookup& lookup,
+                   volatile LONG& progress, char (&summary)[96])
 {
     strcpy_s(summary, sizeof(summary), "CD rip failed: HDD unavailable");
     RipDrive drive;
@@ -486,11 +657,17 @@ HRESULT RipAudioCd(XboxDvdStream& stream, const XboxDvdStream::CdAudioProbe& dis
     {
         if (disc.dataTracks)
             strcpy_s(summary, sizeof(summary), "WAVs saved; mixed-mode AccurateRip lookup unsupported");
-        else
+        else if (lookupDone)
         {
             PublishProgress(progress, CdRipVerifying);
-            Verify(id, disc.audioTracks, crc, confidence, stop, cancel, summary);
+            HANDLE events[] = {stop, cancel, lookupDone};
+            if (WaitForMultipleObjects(ARRAYSIZE(events), events, FALSE, INFINITE) == WAIT_OBJECT_0 + 2)
+                Verify(id, disc.audioTracks, crc, confidence, lookup, summary);
+            else
+                strcpy_s(summary, sizeof(summary), "WAVs saved; AccurateRip lookup unavailable");
         }
+        else
+            strcpy_s(summary, sizeof(summary), "WAVs saved; AccurateRip lookup unavailable");
         if (Cancelled(stop, cancel))
             strcpy_s(summary, sizeof(summary), "WAVs saved; AccurateRip lookup cancelled");
     }

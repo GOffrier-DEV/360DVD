@@ -49,7 +49,6 @@ namespace
             CloseHandle(file);
         }
     }
-
     // XAM normally responds to an optical-tray removal by launching its
     // dashboard fallback, which terminates the current title. We retain
     // XAM's media-change broadcast (360DVD consumes that to enter No Disc)
@@ -258,6 +257,8 @@ namespace
             CloseHandle(ripCancel);
             if (connectionDone) CloseHandle(connectionDone);
             connectionDone = NULL;
+            free(lookup.response);
+            lookup = {};
             thread = stop = ripCancel = NULL;
         }
 
@@ -265,7 +266,9 @@ namespace
         static DWORD WINAPI CheckConnection(void* context)
         {
             CdAudioPlayer& player = *static_cast<CdAudioPlayer*>(context);
-            ProbeAccurateRipConnection(player.stop, player.connectionResult);
+            LookupAccurateRip(player.probe, player.stop, player.lookup);
+            sprintf_s(player.connectionResult, sizeof(player.connectionResult),
+                      "%s   Y: Rip Disc", player.lookup.status);
             SetEvent(player.connectionDone);
             return 0;
         }
@@ -284,6 +287,7 @@ namespace
         HANDLE connectionThread = NULL;
         HANDLE connectionDone = NULL;
         char connectionResult[96] = {};
+        AccurateRipLookup lookup = {};
         enum { Idle, Requested, RippingDisc, Finished };
         volatile LONG ripState = Idle;
         volatile LONG ripProgress = CdRipPreparing;
@@ -317,7 +321,11 @@ namespace
             if (connectionDone)
             {
                 connectionThread = CreateThread(NULL, 0, CheckConnection, this, 0, NULL);
-                if (!connectionThread) SetEvent(connectionDone);
+                if (!connectionThread)
+                {
+                    strcpy_s(lookup.status, sizeof(lookup.status), "AccurateRip lookup unavailable");
+                    SetEvent(connectionDone);
+                }
             }
             return true;
         }
@@ -381,12 +389,8 @@ namespace
                 lba = probe.tracks[0].start;
                 InterlockedExchange(&paused, 1);
                 InterlockedExchange(&skip, 0);
-                if (connectionDone)
-                {
-                    HANDLE events[] = {stop, ripCancel, connectionDone};
-                    WaitForMultipleObjects(ARRAYSIZE(events), events, FALSE, INFINITE);
-                }
-                const HRESULT result = RipAudioCd(stream, probe, stop, ripCancel, ripProgress, ripResult);
+                const HRESULT result = RipAudioCd(stream, probe, stop, ripCancel, connectionDone, lookup,
+                                                  ripProgress, ripResult);
                 BootLog(ripResult, result, true);
                 InterlockedExchange(&ripState, Finished);
                 continue;
@@ -1489,6 +1493,11 @@ namespace
         device->Release();
         return 0;
     }
+}
+
+void LogAccurateRipFailure(const char* message)
+{
+    BootLog(message, S_OK, true);
 }
 
 int main()

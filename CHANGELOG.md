@@ -3,6 +3,12 @@
 All notable changes to 360DVD are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-11-26
+
+- Download AccurateRip records over HTTPS when the CD player opens. Ripping
+  can start during the lookup and uses the downloaded record for verification.
+- Report when the console denies the Internet socket required for AccurateRip.
+
 ## [1.5.4] - 2026-11-26
 
 - Reduced slow DVD First Play startup by caching small physical-disc IFO/BUP

@@ -36,7 +36,12 @@
       <PreprocessorDefinitions>DVD360_LOGGING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(BearSslRoot)' != ''">
+    <ClCompile Include="$(BearSslRoot)\src\**\*.c">
+      <AdditionalIncludeDirectories>$(BearSslRoot)\inc;$(BearSslRoot)\src</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup Condition="'$(BearSslRoot)' == ''">
     <ClCompile Include="deps\libdvdread\src\bitreader.c" />
     <ClCompile Include="deps\libdvdread\src\dvd_input.c" />
     <ClCompile Include="deps\libdvdread\src\dvd_reader.c" />

@@ -109,7 +109,7 @@
       <AdditionalIncludeDirectories>$(EmbeddedResourceDir);$(FfmpegBuildDir);$(FfmpegSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(FfmpegBuildDir)\libavfilter\libavfilter.a;$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;xnet.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <AdditionalDependencies>$(FfmpegBuildDir)\libavfilter\libavfilter.a;$(FfmpegBuildDir)\libavformat\libavformat.a;$(FfmpegBuildDir)\libavcodec\libavcodec.a;$(FfmpegBuildDir)\libswresample\libswresample.a;$(FfmpegBuildDir)\libavutil\libavutil.a;$(BearSslLibrary);xnet.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(VideoPerfLogging)' == 'true'">
@@ -122,7 +122,9 @@
     <ClCompile Include="src\FfmpegThreadPlatform.cpp" />
     <ClCompile Include="src\PlaybackOsd.cpp" />
     <ClCompile Include="src\FfmpegAudio.cpp" />
-    <ClCompile Include="src\CdRip.cpp" />
+    <ClCompile Include="src\CdRip.cpp">
+      <AdditionalIncludeDirectories>$(BearSslRoot)\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="src\DvdEmbeddedResources.cpp" />
   </ItemGroup>
   <ItemGroup>
